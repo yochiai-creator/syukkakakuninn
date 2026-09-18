@@ -22,6 +22,10 @@
 // 出荷作業指図書が入っているルートフォルダ(◆容器種類別)
 var DEFAULT_FOLDER_ID = '1qCpeKIO3gvPWkVDqXApVREDEiWKU_3D6';
 
+// チェック完了PDFの保存先ルート(◆チェック完了)。
+// この下に <年>年/<月>月 を作って振り分ける。
+var DONE_FOLDER_ID = '1fbx7-m2RHcFSA66I7b0nk8UmjBJ8BlPE';
+
 // サブフォルダ対応にあたりキー名を変えている。
 // 以前の TARGET_FOLDER_ID に残っていた値は参照されなくなる。
 var PROP_FOLDER = 'ROOT_FOLDER_ID';
@@ -264,7 +268,7 @@ function loadPdf(fileId) {
  * @param {Object} req
  *   req.fileId   元ファイルのID
  *   req.data     base64のPDF
- *   req.mode     'overwrite' | 'copy'
+ *   req.mode     'overwrite' | 'copy' | 'done'
  * @return {Object} 保存結果
  */
 function savePdf(req) {
@@ -285,12 +289,16 @@ function savePdf(req) {
       return {
         id: updated.id,
         name: original.name,
-        url: 'https://drive.google.com/file/d/' + updated.id + '/view',
+        url: fileUrl_(updated.id),
         mode: 'overwrite'
       };
     }
 
+    if (req.mode === 'done') return saveDone_(req.fileId, original, blob);
+
+    var srcParent = (original.parents || [])[0];
     var newName = original.name.replace(/\.pdf$/i, '') + '_書込.pdf';
+    if (srcParent) newName = uniqueName_(srcParent, newName);
     blob.setName(newName);
 
     var created = Drive.Files.create(
@@ -302,11 +310,75 @@ function savePdf(req) {
     return {
       id: created.id,
       name: newName,
-      url: 'https://drive.google.com/file/d/' + created.id + '/view',
+      url: fileUrl_(created.id),
       mode: 'copy'
     };
 
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * チェック完了として保存する。
+ * ◆チェック完了/<今年>年/<今月>月 に書き込み済みPDFを作り、
+ * それが確実に出来てから元ファイルをゴミ箱へ移す。
+ * コピーに失敗した場合、元ファイルには一切触れない。
+ */
+function saveDone_(fileId, original, blob) {
+  var now = new Date();
+  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
+  var year  = Utilities.formatDate(now, tz, 'yyyy') + '年';
+  var month = Number(Utilities.formatDate(now, tz, 'M')) + '月';
+
+  var yearFolder  = childFolder_(DONE_FOLDER_ID, year);
+  var monthFolder = childFolder_(yearFolder, month);
+
+  var name = uniqueName_(monthFolder, original.name);
+  blob.setName(name);
+
+  var created = Drive.Files.create(
+    { name: name, parents: [monthFolder] },
+    blob,
+    { supportsAllDrives: true }
+  );
+  if (!created || !created.id) throw new Error('チェック完了フォルダへ保存できませんでした');
+
+  // ここまで来て初めて元ファイルを片付ける。
+  // 完全削除ではなくゴミ箱なので、30日間は Drive から戻せる。
+  DriveApp.getFileById(fileId).setTrashed(true);
+
+  return {
+    id: created.id,
+    name: name,
+    url: fileUrl_(created.id),
+    mode: 'done',
+    folder: year + '/' + month,
+    trashed: original.name
+  };
+}
+
+/** 親フォルダ直下の同名フォルダを返す。無ければ作る。 */
+function childFolder_(parentId, name) {
+  var parent = DriveApp.getFolderById(parentId);
+  var it = parent.getFoldersByName(name);
+  if (it.hasNext()) return it.next().getId();
+  return parent.createFolder(name).getId();
+}
+
+/** 同名ファイルがあれば _2, _3 … を付けて重複を避ける。 */
+function uniqueName_(parentId, name) {
+  var parent = DriveApp.getFolderById(parentId);
+  var base = name.replace(/\.pdf$/i, '');
+  var candidate = name;
+
+  for (var n = 2; n < 50; n++) {
+    if (!parent.getFilesByName(candidate).hasNext()) return candidate;
+    candidate = base + '_' + n + '.pdf';
+  }
+  return candidate;
+}
+
+function fileUrl_(id) {
+  return 'https://drive.google.com/file/d/' + id + '/view';
 }

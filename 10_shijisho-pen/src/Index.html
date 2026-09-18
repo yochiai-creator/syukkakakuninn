@@ -144,7 +144,8 @@
 
   <div class="sep"></div>
   <button id="saveCopy" disabled>別名で保存</button>
-  <button id="saveOver" class="solid" disabled>上書き保存</button>
+  <button id="saveOver" disabled>上書き保存</button>
+  <button id="saveDone" class="solid" disabled>チェック完了</button>
   <span id="dirty">未保存</span>
 </div>
 
@@ -229,6 +230,12 @@ $("#clear").onclick = function(){
 };
 $("#saveOver").onclick = function(){ save("overwrite"); };
 $("#saveCopy").onclick = function(){ save("copy"); };
+$("#saveDone").onclick = function(){
+  if(!curFile) return;
+  if(!confirm("チェック完了として ◆チェック完了 に保存します。\n\n保存後、元の "
+    + curFile.name + " はゴミ箱へ移動します。\n(30日間は Drive のゴミ箱から戻せます)\n\nよろしいですか?")) return;
+  save("done");
+};
 
 function setDirty(v){
   dirty=v;
@@ -383,7 +390,7 @@ function mountPdf(res){
   pdfjsLib.getDocument({data: srcBytes.slice()}).promise.then(function(doc){
     pdfDoc=doc; pageCount=doc.numPages;
     hint.hidden=true; sheet.hidden=false;
-    ["prev","next","undo","clear","saveOver","saveCopy"].forEach(function(id){
+    ["prev","next","undo","clear","saveOver","saveCopy","saveDone"].forEach(function(id){
       $("#"+id).disabled=false;
     });
     return renderPage();
@@ -549,10 +556,10 @@ function bytesToB64(bytes){
 
 function save(mode){
   if(!curFile) return;
-  var over=$("#saveOver"), copy=$("#saveCopy");
-  over.disabled=true; copy.disabled=true;
-  var label = mode==="overwrite" ? over : copy;
+  var btns=[$("#saveOver"), $("#saveCopy"), $("#saveDone")];
+  var label = mode==="overwrite" ? $("#saveOver") : (mode==="done" ? $("#saveDone") : $("#saveCopy"));
   var old = label.textContent;
+  btns.forEach(function(b){ b.disabled=true; });
   label.textContent="保存中…";
 
   buildPdf().then(function(bytes){
@@ -564,13 +571,29 @@ function save(mode){
     });
   }).then(function(res){
     setDirty(false);
-    toast(res.mode==="overwrite" ? "上書き保存しました" : res.name+" を作成しました");
+    if(res.mode==="done"){
+      toast("チェック完了 " + res.folder + " へ保存、元ファイルはゴミ箱へ");
+      closeFile();
+    } else {
+      toast(res.mode==="overwrite" ? "上書き保存しました" : res.name+" を作成しました");
+    }
     refreshFiles();
   }).catch(function(err){
     console.error(err);
     toast("保存できませんでした: " + (err.message||err));
   }).then(function(){
-    over.disabled=false; copy.disabled=false; label.textContent=old;
+    btns.forEach(function(b){ b.disabled=false; });
+    label.textContent=old;
+  });
+}
+
+/* チェック完了で元ファイルが消えるため、開いている状態も閉じる */
+function closeFile(){
+  curFile=null; pdfDoc=null; srcBytes=null;
+  marks={}; pageNo=1; pageCount=0; setDirty(false);
+  sheet.hidden=true; hint.hidden=false;
+  ["prev","next","undo","clear","saveOver","saveCopy","saveDone"].forEach(function(id){
+    $("#"+id).disabled=true;
   });
 }
 
