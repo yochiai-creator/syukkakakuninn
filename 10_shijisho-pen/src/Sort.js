@@ -102,7 +102,7 @@ function sortShippingOrdersFor(yearName, monthName, limit) {
       // コピー済みを飛ばした場合は OCR していないので件数に数えない
       if (sortOne_(file, sizeFolders, result) === 'copied') {
         done++;
-        Logger.log('[' + done + '/' + max + '] ' + file.getName());
+        if (done <= 10 || done % 10 === 0) Logger.log('[' + done + '] ' + file.getName());
       }
     } catch (e) {
       done++;  // 失敗でも OCR は走っている可能性があるので1件ぶんと数える
@@ -123,19 +123,37 @@ function sortShippingOrdersFor(yearName, monthName, limit) {
 /* ---------------- 自動で回す(任意) ---------------- */
 
 /**
+ * 自動実行用。件数で区切らず、3分の枠いっぱいまで処理する。
+ * トリガーは第1引数にイベントを渡してくるので、件数を受け取る関数を
+ * そのままトリガーに指定してはいけない(件数のつもりでイベントが入る)。
+ */
+function sortShippingOrdersBulk() {
+  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
+  var now = new Date();
+  return sortShippingOrdersFor(
+    Utilities.formatDate(now, tz, 'yyyy') + '年',
+    Number(Utilities.formatDate(now, tz, 'M')) + '月',
+    100000  // 実質無制限。打ち切りは時間の方で効かせる
+  );
+}
+
+/**
  * 10分おきに自動で回す。件数が多いときに、エディタを見ていなくても
  * 少しずつ片付く。終わったら removeSortTrigger で止めること。
  */
 function installSortTrigger() {
   removeSortTrigger();
-  ScriptApp.newTrigger('sortShippingOrders').timeBased().everyMinutes(10).create();
+  ScriptApp.newTrigger('sortShippingOrdersBulk').timeBased().everyMinutes(10).create();
   return '10分おきの自動実行を登録しました。終わったら removeSortTrigger を実行してください。';
 }
 
 function removeSortTrigger() {
   var n = 0;
   ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'sortShippingOrders') { ScriptApp.deleteTrigger(t); n++; }
+    var f = t.getHandlerFunction();
+    if (f === 'sortShippingOrdersBulk' || f === 'sortShippingOrders') {
+      ScriptApp.deleteTrigger(t); n++;
+    }
   });
   return n + ' 件の自動実行を解除しました。';
 }
@@ -180,16 +198,33 @@ function sortOne_(file, sizeFolders, result) {
 /**
  * PDF を Google ドキュメントへ変換して本文を取り出す。
  * 変換物は読み終えたら必ず捨てる。
+ *
+ * 本文の取得に DocumentApp は使わない。documents スコープが要るため、
+ * マニフェストにスコープを足す→再認可、となってウェブアプリ側にも
+ * 影響が出る。Drive API の export なら既にある drive スコープで済む。
  */
 function readPdfText_(file) {
   var doc = null;
   try {
+    // 変換先は自分のマイドライブ(親を指定しない)。共有ドライブを汚さない。
     doc = Drive.Files.create(
       { name: 'ocr_' + Utilities.getUuid(), mimeType: MimeType.GOOGLE_DOCS },
       file.getBlob(),
-      { ocrLanguage: 'ja', supportsAllDrives: true }
+      { ocrLanguage: 'ja' }
     );
-    return DocumentApp.openById(doc.id).getBody().getText();
+
+    var res = UrlFetchApp.fetch(
+      'https://www.googleapis.com/drive/v3/files/' + doc.id + '/export?mimeType=text/plain',
+      {
+        headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+        muteHttpExceptions: true
+      }
+    );
+    if (res.getResponseCode() !== 200) {
+      throw new Error('本文を取り出せません (HTTP ' + res.getResponseCode() + ')');
+    }
+    return res.getContentText();
+
   } finally {
     if (doc && doc.id) {
       try { DriveApp.getFileById(doc.id).setTrashed(true); } catch (e) {}
