@@ -42,6 +42,10 @@ var SORT_TIME_BUDGET_MS = 5 * 60 * 1000;
 // 切り替える前に sortBenchmark で読めることを確かめること。
 var SORT_OCR_LANGUAGE = 'ja';
 
+// 得意先マスタ(コード→会社名)の置き場。'001_【出荷】 の直下に作る。
+var MASTER_PARENT_ID = '1iSYAN13NXaxaLkhVdEywcJkJ0YdVULBu';
+var PROP_MASTER_SHEET = 'CUSTOMER_MASTER_ID';
+
 
 /**
  * 当月ぶんを振り分ける。
@@ -132,7 +136,7 @@ function sortShippingOrdersFor(yearName, monthName, limit) {
     throw new Error('振り分け先の容器サイズフォルダが見つかりません');
   }
 
-  var result = { 対象: yearName + '/' + monthName, コピー: [], 済み: 0, skip: [], 残り: 0 };
+  var result = { 対象: yearName + '/' + monthName, コピー: [], 済み: 0, skip: [], 未登録: [], 残り: 0 };
   var files = DriveApp.getFolderById(src).getFilesByType(MimeType.PDF);
   var done = 0;
 
@@ -161,6 +165,11 @@ function sortShippingOrdersFor(yearName, monthName, limit) {
   result.メモ = result.残り
     ? '残り ' + result.残り + ' 件。もう一度 sortShippingOrders を実行すれば続きから進みます。'
     : 'この月は全部終わりました。';
+
+  if (result.未登録.length) {
+    result.メモ += ' マスタに無い得意先が ' + result.未登録.length +
+      ' 件あります。得意先マスタに追加すると会社名が正確になります。';
+  }
 
   Logger.log(JSON.stringify(result, null, 2));
   return result;
@@ -234,12 +243,125 @@ function sortOne_(file, sizeFolders, result) {
   var dest = sizeFolders[size];
   if (!dest) throw new Error(size + 'kg の振り分け先フォルダがありません');
 
-  var to = extractDestination_(text);
+  // 出荷先はマスタを優先する。OCR の読みは会社名が崩れるため、
+  // 得意先コードで引き当てて正しい表記に置き換える。
+  var code = extractCustomerCode_(text);
+  var master = loadCustomerMaster_();
+  var to = code && master[code] ? master[code] : '';
+
+  if (!to) {
+    to = extractDestination_(text);                 // マスタに無ければOCRの読み
+    result.未登録.push({ コード: code || '読めず', OCRの名前: to, 元: srcName });
+  }
+
   var newName = prefix + (to || '出荷先不明') + '.pdf';
 
   DriveApp.getFolderById(dest.id).createFile(file.getBlob().setName(newName));
   result.コピー.push(dest.path + '/' + newName);
   return 'copied';
+}
+
+
+/* ---------------- 得意先マスタ ---------------- */
+
+/**
+ * 得意先マスタを作る。初回に一度だけ実行する。
+ * 既にあれば作らず URL を返す。
+ *
+ * CSV を Drive に投げると変換されてスプレッドシートになる。
+ * SpreadsheetApp を使うと spreadsheets スコープが要り、再認可で
+ * ウェブアプリにも影響が出るため、この作り方にしている。
+ */
+function setupCustomerMaster() {
+  var props = PropertiesService.getScriptProperties();
+  var id = props.getProperty(PROP_MASTER_SHEET);
+
+  if (id) {
+    try {
+      var f = DriveApp.getFileById(id);
+      if (!f.isTrashed()) return { 状態: '既にあります', url: f.getUrl() };
+    } catch (e) { /* 消されていれば作り直す */ }
+  }
+
+  var csv = '得意先コード,会社名\n';
+  var blob = Utilities.newBlob(csv, 'text/csv', 'master.csv');
+
+  var ss = Drive.Files.create(
+    {
+      name: '得意先マスタ（指図書振り分け用）',
+      mimeType: MimeType.GOOGLE_SHEETS,
+      parents: [MASTER_PARENT_ID]
+    },
+    blob,
+    { supportsAllDrives: true }
+  );
+
+  props.setProperty(PROP_MASTER_SHEET, ss.id);
+  return {
+    状態: '作りました',
+    url: 'https://docs.google.com/spreadsheets/d/' + ss.id + '/edit',
+    使い方: 'A列に得意先コード、B列に正しい会社名を入れてください。'
+  };
+}
+
+/** マスタを読み込む。1回の実行につき1度だけ取りに行く。 */
+var customerMasterCache_ = null;
+
+function loadCustomerMaster_() {
+  if (customerMasterCache_) return customerMasterCache_;
+
+  var id = PropertiesService.getScriptProperties().getProperty(PROP_MASTER_SHEET);
+  if (!id) { customerMasterCache_ = {}; return customerMasterCache_; }
+
+  var res = UrlFetchApp.fetch(
+    'https://www.googleapis.com/drive/v3/files/' + id + '/export?mimeType=text/csv',
+    {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true
+    }
+  );
+  if (res.getResponseCode() !== 200) { customerMasterCache_ = {}; return customerMasterCache_; }
+
+  var map = {};
+  parseCsv_(res.getContentText()).forEach(function (row, i) {
+    if (i === 0) return;                       // 見出し行
+    var code = String(row[0] || '').trim();
+    var name = String(row[1] || '').trim();
+    if (code && name) map[code.toUpperCase()] = name;
+  });
+
+  customerMasterCache_ = map;
+  return map;
+}
+
+/** 引用符付きに対応した最小限の CSV 解析。 */
+function parseCsv_(text) {
+  var rows = [], row = [], cell = '', quoted = false;
+
+  for (var i = 0; i < text.length; i++) {
+    var c = text.charAt(i);
+
+    if (quoted) {
+      if (c === '"') {
+        if (text.charAt(i + 1) === '"') { cell += '"'; i++; }
+        else quoted = false;
+      } else cell += c;
+      continue;
+    }
+
+    if (c === '"') quoted = true;
+    else if (c === ',') { row.push(cell); cell = ''; }
+    else if (c === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
+    else if (c !== '\r') cell += c;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+/** 出荷先の行から得意先コードだけを取る。 */
+function extractCustomerCode_(text) {
+  var m = text.match(/出荷先[:：]\s*([0-9A-Za-z]{3,5})(?=[\s(（])/);
+  return m ? m[1].toUpperCase() : '';
 }
 
 
