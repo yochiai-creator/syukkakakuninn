@@ -242,17 +242,17 @@ function collectFolderIds_(root) {
 /* ---------------- 読み込み ---------------- */
 
 function loadPdf(fileId) {
-  var meta = Drive.Files.get(fileId, {
-    supportsAllDrives: true,
-    fields: 'id,name,mimeType,size'
-  });
-  if (meta.mimeType !== PDF_MIME) throw new Error('PDFではありません: ' + meta.name);
-
-  var blob = DriveApp.getFileById(fileId).getBlob();
+  // Drive高度サービスのfields指定は使わない。
+  // DriveApp だけで名前・種類・中身が取れるうえ、
+  // フィールド選択の食い違いで失敗する余地が無い。
+  var file = DriveApp.getFileById(fileId);
+  if (file.getMimeType() !== PDF_MIME) {
+    throw new Error('PDFではありません: ' + file.getName());
+  }
   return {
     id: fileId,
-    name: meta.name,
-    data: Utilities.base64Encode(blob.getBytes())
+    name: file.getName(),
+    data: Utilities.base64Encode(file.getBlob().getBytes())
   };
 }
 
