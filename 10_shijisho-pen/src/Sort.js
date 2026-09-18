@@ -269,8 +269,7 @@ function sortOne_(file, sizeFolders, doneNames, result) {
   // 出荷先はマスタを優先する。OCR の読みは会社名が崩れるため、
   // 得意先コードで引き当てて正しい表記に置き換える。
   var code = extractCustomerCode_(text);
-  var master = loadCustomerMaster_();
-  var to = code && master[code] ? master[code] : '';
+  var to = lookupCustomer_(code);
 
   if (!to) {
     to = extractDestination_(text);                 // マスタに無ければOCRの読み
@@ -365,7 +364,7 @@ function addCustomerMaster(rows) {
   var added = [];
 
   rows.forEach(function (r) {
-    var code = String(r[0] || '').trim().toUpperCase();
+    var code = normCode_(r[0]);
     var name = String(r[1] || '').trim();
     if (!code || !name) return;
     added.push(code + ' → ' + name);
@@ -382,6 +381,27 @@ function addCustomerMaster(rows) {
   customerMasterCache_ = null;
   Logger.log(JSON.stringify({ 追加: added, マスタ件数: Object.keys(map).length }, null, 2));
   return { 追加: added, マスタ件数: Object.keys(map).length };
+}
+
+/**
+ * 得意先コードの突き合わせ用に正す。
+ *
+ * CSV をスプレッドシートに変換すると 0820 が数値扱いになり 820 に
+ * なってしまう。表の側を直しても入力のたびに同じことが起きるため、
+ * 数字だけのコードは先頭のゼロを無視して比べる。
+ */
+function normCode_(code) {
+  code = String(code || '').trim().toUpperCase();
+  return /^\d+$/.test(code) ? String(Number(code)) : code;
+}
+
+/** 登録済みの得意先を一覧する。何が入っているか確かめるとき用。 */
+function showCustomerMaster() {
+  customerMasterCache_ = null;
+  var map = loadCustomerMaster_();
+  var rows = Object.keys(map).sort().map(function (k) { return k + ' → ' + map[k]; });
+  Logger.log(JSON.stringify({ 件数: rows.length, 一覧: rows }, null, 2));
+  return { 件数: rows.length, 一覧: rows };
 }
 
 /** CSV の1セル。区切りや引用符を含むときだけ囲う。 */
@@ -411,9 +431,9 @@ function loadCustomerMaster_() {
   var map = {};
   parseCsv_(res.getContentText()).forEach(function (row, i) {
     if (i === 0) return;                       // 見出し行
-    var code = String(row[0] || '').trim();
+    var code = normCode_(row[0]);
     var name = String(row[1] || '').trim();
-    if (code && name) map[code.toUpperCase()] = name;
+    if (code && name) map[code] = name;
   });
 
   customerMasterCache_ = map;
@@ -452,6 +472,13 @@ function parseCsv_(text) {
 function extractCustomerCode_(text) {
   var m = text.match(/出荷先[:：]\s*(\d{3,5}|[A-Za-z]\d{2,4})(?![0-9A-Za-z])/);
   return m ? m[1].toUpperCase() : '';
+}
+
+/** 読み取ったコードでマスタを引く。先頭ゼロの違いは吸収する。 */
+function lookupCustomer_(code) {
+  if (!code) return '';
+  var map = loadCustomerMaster_();
+  return map[normCode_(code)] || '';
 }
 
 
