@@ -26,8 +26,13 @@ var SRC_ROOT_ID = '13qWXWwBXgbEO9avO5qlnZ0WHDaMSaYA_';
 // 先: ◆容器種類別
 var SORT_DEST_ROOT_ID = '1qCpeKIO3gvPWkVDqXApVREDEiWKU_3D6';
 
+// 1回の実行で処理する最大件数。
+// 1ファイルごとに OCR 変換が走るので、まとめてやると数分かかり
+// エディタが回りっぱなしになる。少しずつ何度も回す方が状況が分かる。
+var SORT_MAX_PER_RUN = 10;
+
 // 実行時間の上限(GASの6分制限に対する余裕)
-var SORT_TIME_BUDGET_MS = 4.5 * 60 * 1000;
+var SORT_TIME_BUDGET_MS = 3 * 60 * 1000;
 
 
 /**
@@ -44,12 +49,31 @@ function sortShippingOrders() {
 }
 
 /**
+ * まず1件だけ処理して所要時間を見る。
+ * OCR が効くか、1件あたり何秒かかるかを確かめてから本番を回す。
+ */
+function sortTestOne() {
+  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
+  var now = new Date();
+  var t = Date.now();
+  var r = sortShippingOrdersFor(
+    Utilities.formatDate(now, tz, 'yyyy') + '年',
+    Number(Utilities.formatDate(now, tz, 'M')) + '月',
+    1
+  );
+  r.所要秒 = Math.round((Date.now() - t) / 100) / 10;
+  Logger.log('1件あたり約 ' + r.所要秒 + ' 秒');
+  return r;
+}
+
+/**
  * 年月を指定して振り分ける。過去の月をやり直すとき用。
  * @param {string} yearName  例 '2026年'
  * @param {string} monthName 例 '9月'
  */
-function sortShippingOrdersFor(yearName, monthName) {
+function sortShippingOrdersFor(yearName, monthName, limit) {
   var started = Date.now();
+  var max = limit || SORT_MAX_PER_RUN;
 
   var src = findChildFolder_(SRC_ROOT_ID, yearName);
   if (!src) throw new Error('元フォルダが見つかりません: ' + yearName);
@@ -63,24 +87,57 @@ function sortShippingOrdersFor(yearName, monthName) {
 
   var result = { 対象: yearName + '/' + monthName, コピー: [], 済み: 0, skip: [], 残り: 0 };
   var files = DriveApp.getFolderById(src).getFilesByType(MimeType.PDF);
+  var done = 0;
 
   while (files.hasNext()) {
     var file = files.next();
 
-    if (Date.now() - started > SORT_TIME_BUDGET_MS) {
+    // 打ち切ったあとは数えるだけ。もう一度実行すれば続きから進む
+    if (done >= max || Date.now() - started > SORT_TIME_BUDGET_MS) {
       result.残り++;
-      continue;  // 時間切れ。もう一度実行すれば続きから進む
+      continue;
     }
 
     try {
-      sortOne_(file, sizeFolders, result);
+      // コピー済みを飛ばした場合は OCR していないので件数に数えない
+      if (sortOne_(file, sizeFolders, result) === 'copied') {
+        done++;
+        Logger.log('[' + done + '/' + max + '] ' + file.getName());
+      }
     } catch (e) {
+      done++;  // 失敗でも OCR は走っている可能性があるので1件ぶんと数える
       result.skip.push(file.getName() + ' — ' + e.message);
+      Logger.log('skip: ' + file.getName() + ' — ' + e.message);
     }
   }
 
+  result.メモ = result.残り
+    ? '残り ' + result.残り + ' 件。もう一度 sortShippingOrders を実行すれば続きから進みます。'
+    : 'この月は全部終わりました。';
+
   Logger.log(JSON.stringify(result, null, 2));
   return result;
+}
+
+
+/* ---------------- 自動で回す(任意) ---------------- */
+
+/**
+ * 10分おきに自動で回す。件数が多いときに、エディタを見ていなくても
+ * 少しずつ片付く。終わったら removeSortTrigger で止めること。
+ */
+function installSortTrigger() {
+  removeSortTrigger();
+  ScriptApp.newTrigger('sortShippingOrders').timeBased().everyMinutes(10).create();
+  return '10分おきの自動実行を登録しました。終わったら removeSortTrigger を実行してください。';
+}
+
+function removeSortTrigger() {
+  var n = 0;
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'sortShippingOrders') { ScriptApp.deleteTrigger(t); n++; }
+  });
+  return n + ' 件の自動実行を解除しました。';
 }
 
 
@@ -99,7 +156,7 @@ function sortOne_(file, sizeFolders, result) {
   var prefix = date + '_' + orderNo + '_';
 
   // コピー済みなら OCR せずに飛ばす
-  if (alreadyCopied_(prefix, sizeFolders)) { result.済み++; return; }
+  if (alreadyCopied_(prefix, sizeFolders)) { result.済み++; return 'already'; }
 
   var text = readPdfText_(file);
 
@@ -114,6 +171,7 @@ function sortOne_(file, sizeFolders, result) {
 
   DriveApp.getFolderById(dest.id).createFile(file.getBlob().setName(newName));
   result.コピー.push(dest.path + '/' + newName);
+  return 'copied';
 }
 
 
