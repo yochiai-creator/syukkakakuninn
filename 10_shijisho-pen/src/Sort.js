@@ -42,6 +42,11 @@ var SORT_TIME_BUDGET_MS = 5 * 60 * 1000;
 // 切り替える前に sortBenchmark で読めることを確かめること。
 var SORT_OCR_LANGUAGE = 'ja';
 
+// 出荷日が当日以前のものは対象にしない。
+// 済んだ出荷の指図書は今さらチェックしないため。
+// 過去の月をまとめて取り込みたいときだけ false にする。
+var SORT_SKIP_PAST = true;
+
 // 得意先マスタ(コード→会社名)の置き場。'001_【出荷】 の直下に作る。
 var MASTER_PARENT_ID = '1iSYAN13NXaxaLkhVdEywcJkJ0YdVULBu';
 var PROP_MASTER_SHEET = 'CUSTOMER_MASTER_ID';
@@ -122,9 +127,14 @@ function sortBenchmark() {
  * @param {string} yearName  例 '2026年'
  * @param {string} monthName 例 '9月'
  */
+var sortTodayNum_ = 0;   // 20260919 の形。当日以前の判定に使う
+
 function sortShippingOrdersFor(yearName, monthName, limit) {
   var started = Date.now();
   var max = limit || SORT_MAX_PER_RUN;
+
+  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
+  sortTodayNum_ = Number(Utilities.formatDate(new Date(), tz, 'yyyyMMdd'));
 
   var src = findChildFolder_(SRC_ROOT_ID, yearName);
   if (!src) throw new Error('元フォルダが見つかりません: ' + yearName);
@@ -142,7 +152,10 @@ function sortShippingOrdersFor(yearName, monthName, limit) {
   // 問い合わせも1回で済む。
   var doneNames = collectDestNames_(sizeFolders);
 
-  var result = { 対象: yearName + '/' + monthName, コピー: [], 済み: 0, skip: [], 未登録: [], 残り: 0 };
+  var result = {
+    対象: yearName + '/' + monthName,
+    コピー: [], 済み: 0, 対象外: 0, skip: [], 未登録: [], 残り: 0
+  };
   var files = DriveApp.getFolderById(src).getFilesByType(MimeType.PDF);
   var done = 0;
 
@@ -171,6 +184,11 @@ function sortShippingOrdersFor(yearName, monthName, limit) {
   result.メモ = result.残り
     ? '残り ' + result.残り + ' 件。もう一度 sortShippingOrders を実行すれば続きから進みます。'
     : 'この月は全部終わりました。';
+
+  if (result.対象外) {
+    result.メモ += ' 出荷日が当日以前のため対象外にしたものが ' +
+      result.対象外 + ' 件あります。';
+  }
 
   // 未登録はコードごとにまとめる。同じ得意先が何件も並ぶと見づらく、
   // マスタへ写すときにも邪魔になる。
@@ -250,6 +268,13 @@ function sortOne_(file, sizeFolders, doneNames, result) {
 
   var date = m[1];                 // 26.09.25
   var orderNo = m[2] + (m[3] || ''); // 26-60749-0(1)
+
+  // 出荷日が当日以前なら何もしない。日付はファイル名から取れるので
+  // OCR を通す前に判定でき、そのぶん変換も走らない。
+  if (SORT_SKIP_PAST && shipDateNum_(date) <= sortTodayNum_) {
+    result.対象外++;
+    return 'past';
+  }
 
   var prefix = date + '_' + orderNo + '_';
 
@@ -402,6 +427,12 @@ function showCustomerMaster() {
   var rows = Object.keys(map).sort().map(function (k) { return k + ' → ' + map[k]; });
   Logger.log(JSON.stringify({ 件数: rows.length, 一覧: rows }, null, 2));
   return { 件数: rows.length, 一覧: rows };
+}
+
+/** '26.09.25' を 20260925 にする。比較しやすい形にするだけ。 */
+function shipDateNum_(date) {
+  var p = date.split('.');
+  return Number('20' + p[0] + p[1] + p[2]);
 }
 
 /** CSV の1セル。区切りや引用符を含むときだけ囲う。 */
