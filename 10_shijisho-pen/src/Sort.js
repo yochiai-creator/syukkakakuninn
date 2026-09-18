@@ -31,8 +31,16 @@ var SORT_DEST_ROOT_ID = '1qCpeKIO3gvPWkVDqXApVREDEiWKU_3D6';
 // エディタが回りっぱなしになる。少しずつ何度も回す方が状況が分かる。
 var SORT_MAX_PER_RUN = 10;
 
-// 実行時間の上限(GASの6分制限に対する余裕)
-var SORT_TIME_BUDGET_MS = 3 * 60 * 1000;
+// 実行時間の上限(GASの6分制限に対する余裕)。
+// 1件あたりの所要時間ぶんは残しておくこと。
+var SORT_TIME_BUDGET_MS = 5 * 60 * 1000;
+
+// PDF→ドキュメント変換で OCR を使うか。
+// '' なら使わない。印刷生成の PDF は文字を持っているので不要で、
+// その場合こちらの方がはるかに速く、精度も高い。
+// 文字を持たない(画像だけの)PDF なら 'ja' にする。
+// どちらが要るかは sortBenchmark で確かめられる。
+var SORT_OCR_LANGUAGE = '';
 
 
 /**
@@ -64,6 +72,45 @@ function sortTestOne() {
   r.所要秒 = Math.round((Date.now() - t) / 100) / 10;
   Logger.log('1件あたり約 ' + r.所要秒 + ' 秒');
   return r;
+}
+
+/**
+ * 当月フォルダの先頭1件で、OCR あり / なし の速さと読み取り結果を比べる。
+ * 何もコピーしないので安全。どちらを使うか決めるために実行する。
+ */
+function sortBenchmark() {
+  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
+  var now = new Date();
+  var src = findChildFolder_(SRC_ROOT_ID, Utilities.formatDate(now, tz, 'yyyy') + '年');
+  src = findChildFolder_(src, Number(Utilities.formatDate(now, tz, 'M')) + '月');
+
+  var it = DriveApp.getFolderById(src).getFilesByType(MimeType.PDF);
+  if (!it.hasNext()) throw new Error('PDF がありません');
+  var file = it.next();
+
+  var keep = SORT_OCR_LANGUAGE;
+  var out = { ファイル: file.getName(), 結果: [] };
+
+  ['', 'ja'].forEach(function (mode) {
+    SORT_OCR_LANGUAGE = mode;
+    var t = Date.now();
+    var row = { OCR: mode ? 'あり' : 'なし' };
+    try {
+      var text = readPdfText_(file);
+      row.秒 = Math.round((Date.now() - t) / 100) / 10;
+      row.文字数 = text.length;
+      row.容器サイズ = extractSizeKg_(text) || '読めず';
+      row.出荷先 = extractDestination_(text) || '読めず';
+    } catch (e) {
+      row.秒 = Math.round((Date.now() - t) / 100) / 10;
+      row.エラー = e.message;
+    }
+    out.結果.push(row);
+  });
+
+  SORT_OCR_LANGUAGE = keep;
+  Logger.log(JSON.stringify(out, null, 2));
+  return out;
 }
 
 /**
@@ -207,10 +254,11 @@ function readPdfText_(file) {
   var doc = null;
   try {
     // 変換先は自分のマイドライブ(親を指定しない)。共有ドライブを汚さない。
+    var opts = SORT_OCR_LANGUAGE ? { ocrLanguage: SORT_OCR_LANGUAGE } : {};
     doc = Drive.Files.create(
-      { name: 'ocr_' + Utilities.getUuid(), mimeType: MimeType.GOOGLE_DOCS },
+      { name: 'conv_' + Utilities.getUuid(), mimeType: MimeType.GOOGLE_DOCS },
       file.getBlob(),
-      { ocrLanguage: 'ja' }
+      opts
     );
 
     var res = UrlFetchApp.fetch(
