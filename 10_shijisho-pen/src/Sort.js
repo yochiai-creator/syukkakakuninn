@@ -303,7 +303,11 @@ function extractDestination_(text) {
   if (!m) return '';
 
   var line = m[1].replace(/\s+/g, ' ').trim();
-  line = line.replace(/^[0-9A-Za-z]{2,6}\s+/, '');   // 得意先コード
+
+  // 得意先コードを落とす。空白が無い場合がある(8537(株小国資源開発)。
+  // 会社名を削らないよう、実際の形(4桁数字 または 英字1+数字3)に限る。
+  line = line.replace(/^(?:\d{4}|[A-Za-z]\d{3})(?=[\s(（])\s*/, '');
+
   return sanitizeName_(line);
 }
 
@@ -374,6 +378,39 @@ function alreadyCopied_(prefix, sizeFolders) {
     includeItemsFromAllDrives: true
   });
   return !!(res.files && res.files.length);
+}
+
+/**
+ * 振り分け済みのコピーをゴミ箱へ移す。読み取りを直してやり直すとき用。
+ * 元の指図書には触らない。消すのはコピーだけ。
+ *
+ *   trashSortedCopies(['26.09.25_26-60753-0_', '26.09.29_26-50390-0(1)_'])
+ *
+ * @param {Array<string>} prefixes 日付_依頼No_ の形の先頭一致
+ */
+function trashSortedCopies(prefixes) {
+  if (!prefixes || !prefixes.length) throw new Error('消す対象を指定してください');
+
+  var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
+  var removed = [];
+
+  Object.keys(index).forEach(function (kg) {
+    var folder = DriveApp.getFolderById(index[kg].id);
+    var it = folder.getFiles();
+    while (it.hasNext()) {
+      var f = it.next(), name = f.getName();
+      for (var i = 0; i < prefixes.length; i++) {
+        if (name.indexOf(prefixes[i]) === 0) {
+          f.setTrashed(true);
+          removed.push(index[kg].path + '/' + name);
+          break;
+        }
+      }
+    }
+  });
+
+  Logger.log(JSON.stringify(removed, null, 2));
+  return { 消した件数: removed.length, 一覧: removed };
 }
 
 /** 指定の名前の子フォルダの ID。無ければ空文字。 */
