@@ -136,6 +136,12 @@ function sortShippingOrdersFor(yearName, monthName, limit) {
     throw new Error('振り分け先の容器サイズフォルダが見つかりません');
   }
 
+  // 振り分け先にある名前を先に全部読んでおく。
+  // Drive の name contains は素直な部分一致ではなく、括弧を含む名前で
+  // 取りこぼして二重コピーが起きた。手元で突き合わせる方が確実で、
+  // 問い合わせも1回で済む。
+  var doneNames = collectDestNames_(sizeFolders);
+
   var result = { 対象: yearName + '/' + monthName, コピー: [], 済み: 0, skip: [], 未登録: [], 残り: 0 };
   var files = DriveApp.getFolderById(src).getFilesByType(MimeType.PDF);
   var done = 0;
@@ -151,7 +157,7 @@ function sortShippingOrdersFor(yearName, monthName, limit) {
 
     try {
       // コピー済みを飛ばした場合は OCR していないので件数に数えない
-      if (sortOne_(file, sizeFolders, result) === 'copied') {
+      if (sortOne_(file, sizeFolders, doneNames, result) === 'copied') {
         done++;
         if (done <= 10 || done % 10 === 0) Logger.log('[' + done + '] ' + file.getName());
       }
@@ -234,7 +240,7 @@ function removeSortTrigger() {
 
 /* ---------------- 1ファイルぶんの処理 ---------------- */
 
-function sortOne_(file, sizeFolders, result) {
+function sortOne_(file, sizeFolders, doneNames, result) {
   var srcName = file.getName();
 
   // 日付と依頼Noはファイル名から取れる。ここは OCR に頼らない。
@@ -250,7 +256,7 @@ function sortOne_(file, sizeFolders, result) {
   // コピー済みなら OCR せずに飛ばす。
   // 出荷先は OCR 由来で実行ごとに揺れるため、完全一致では見ない。
   // 末尾の _ があるので 26-60754-0_ が 26-60754-0(1)_ に当たることはない。
-  if (alreadyCopied_(prefix, sizeFolders)) { result.済み++; return 'already'; }
+  if (alreadyCopied_(prefix, doneNames)) { result.済み++; return 'already'; }
 
   var text = readPdfText_(file);
 
@@ -274,6 +280,7 @@ function sortOne_(file, sizeFolders, result) {
   var newName = prefix + (to || '出荷先不明') + '.pdf';
 
   DriveApp.getFolderById(dest.id).createFile(file.getBlob().setName(newName));
+  doneNames.push(newName);   // 同じ実行の中でも二重にコピーしない
   result.コピー.push(dest.path + '/' + newName);
   return 'copied';
 }
@@ -319,6 +326,23 @@ function setupCustomerMaster() {
     url: 'https://docs.google.com/spreadsheets/d/' + ss.id + '/edit',
     使い方: 'A列に得意先コード、B列に正しい会社名を入れてください。'
   };
+}
+
+/**
+ * ここに得意先を書いて registerCustomers を実行すると、マスタに入る。
+ * エディタの実行ボタンは引数を渡せないため、この形にしている。
+ * 追加したいときはこの表に行を足してから実行する。
+ * 既に入っているコードは新しい方で上書きされる。
+ */
+var CUSTOMER_ROWS = [
+  ['8537', '㈱小国資源開発'],
+  ['0820', 'ひかり工機'],
+  ['3580', '(株)サイサン 磐田工場']
+];
+
+/** 上の CUSTOMER_ROWS をマスタに登録する。エディタから実行できる。 */
+function registerCustomers() {
+  return addCustomerMaster(CUSTOMER_ROWS);
 }
 
 /**
@@ -552,25 +576,56 @@ function folderSizeKg_(name) {
 }
 
 /**
- * 同じ日付・依頼Noのコピーが振り分け先に既にあるか。
- * 探すのは容器サイズフォルダの中だけ。ドライブ全体を見ると別名保存で
+ * 振り分け先にあるファイル名を集める。
+ * 見るのは容器サイズフォルダの中だけ。ドライブ全体を見ると別名保存で
  * できた _書込.pdf まで拾い、未処理のものを処理済みと誤判定する。
  */
-function alreadyCopied_(prefix, sizeFolders) {
-  var parents = Object.keys(sizeFolders).map(function (kg) {
-    return "'" + q_(sizeFolders[kg].id) + "' in parents";
-  }).join(' or ');
-  if (!parents) return false;
-
-  var res = Drive.Files.list({
-    q: '(' + parents + ") and mimeType = '" + PDF_MIME + "' and trashed = false" +
-       " and name contains '" + q_(prefix) + "'",
-    pageSize: 1,
-    fields: 'files(id)',
-    supportsAllDrives: true,
-    includeItemsFromAllDrives: true
+function collectDestNames_(sizeFolders) {
+  var names = [];
+  Object.keys(sizeFolders).forEach(function (kg) {
+    var it = DriveApp.getFolderById(sizeFolders[kg].id).getFiles();
+    while (it.hasNext()) names.push(it.next().getName());
   });
-  return !!(res.files && res.files.length);
+  return names;
+}
+
+/** 同じ日付・依頼Noのコピーが既にあるか。先頭一致で見る。 */
+function alreadyCopied_(prefix, doneNames) {
+  for (var i = 0; i < doneNames.length; i++) {
+    if (doneNames[i].indexOf(prefix) === 0) return true;
+  }
+  return false;
+}
+
+/**
+ * ここに 日付_依頼No_ を並べて trashListedCopies を実行すると消える。
+ * エディタの実行ボタンは引数を渡せないため、この形にしている。
+ * 下は これまでの実行でできたコピー(二重ぶんを含む)。
+ */
+var TRASH_PREFIXES = [
+  '26.09.18_26-10713-0(1)_',
+  '26.09.25_26-20334-0(1)_',
+  '26.09.25_26-60749-0(1)_',
+  '26.09.25_26-60753-0_',
+  '26.09.25_26-60754-0(1)_',
+  '26.09.25_26-60754-0(2)_',
+  '26.09.29_26-10715-0(1)_',
+  '26.09.29_26-50389-0(1)_',
+  '26.09.29_26-50390-0(1)_',
+  '26.09.30_26-10716-0(1)_',
+  '26.09.30_26-70289-0(1)_',
+  '26.09.30_26-70289-0(2)_',
+  '26.09.30_26-70289-0(3)_',
+  '26.09.30_26-70290-0(1)_',
+  '26.09.30_26-70290-0(2)_',
+  '26.09.30_26-70290-0(3)_',
+  '26.09.30_26-70290-0(4)_',
+  '26.09.30_26-70290-0(5)_'
+];
+
+/** 上の TRASH_PREFIXES のコピーをゴミ箱へ。エディタから実行できる。 */
+function trashListedCopies() {
+  return trashSortedCopies(TRASH_PREFIXES);
 }
 
 /**
