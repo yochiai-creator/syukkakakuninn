@@ -218,9 +218,12 @@ function sortOne_(file, sizeFolders, result) {
 
   var date = m[1];                 // 26.09.25
   var orderNo = m[2] + (m[3] || ''); // 26-60749-0(1)
+
   var prefix = date + '_' + orderNo + '_';
 
-  // コピー済みなら OCR せずに飛ばす
+  // コピー済みなら OCR せずに飛ばす。
+  // 出荷先は OCR 由来で実行ごとに揺れるため、完全一致では見ない。
+  // 末尾の _ があるので 26-60754-0_ が 26-60754-0(1)_ に当たることはない。
   if (alreadyCopied_(prefix, sizeFolders)) { result.済み++; return 'already'; }
 
   var text = readPdfText_(file);
@@ -304,9 +307,11 @@ function extractDestination_(text) {
 
   var line = m[1].replace(/\s+/g, ' ').trim();
 
-  // 得意先コードを落とす。空白が無い場合がある(8537(株小国資源開発)。
-  // 会社名を削らないよう、実際の形(4桁数字 または 英字1+数字3)に限る。
-  line = line.replace(/^(?:\d{4}|[A-Za-z]\d{3})(?=[\s(（])\s*/, '');
+  // 先頭の得意先コードを落とす。空白が無い場合がある(8537(株小国資源開発)。
+  // 実際の形は4文字(6757 / G737 / 8537 / 0820)だが、OCR が桁を
+  // 読み違える余地を見て3〜5桁まで許す。会社名まで削らないよう、
+  // 直後が空白か括弧のときだけ落とす。
+  line = line.replace(/^(?:\d{3,5}|[A-Za-z]\d{2,4})(?=[\s(（])\s*/, '');
 
   return sanitizeName_(line);
 }
@@ -359,9 +364,8 @@ function folderSizeKg_(name) {
 
 /**
  * 同じ日付・依頼Noのコピーが振り分け先に既にあるか。
- * 探すのは容器サイズフォルダの中だけにする。ドライブ全体を見ると
- * 別名保存でできた _書込.pdf まで拾ってしまい、未処理のものを
- * 処理済みと誤判定する。
+ * 探すのは容器サイズフォルダの中だけ。ドライブ全体を見ると別名保存で
+ * できた _書込.pdf まで拾い、未処理のものを処理済みと誤判定する。
  */
 function alreadyCopied_(prefix, sizeFolders) {
   var parents = Object.keys(sizeFolders).map(function (kg) {
