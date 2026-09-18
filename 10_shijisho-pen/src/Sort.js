@@ -166,9 +166,26 @@ function sortShippingOrdersFor(yearName, monthName, limit) {
     ? '残り ' + result.残り + ' 件。もう一度 sortShippingOrders を実行すれば続きから進みます。'
     : 'この月は全部終わりました。';
 
-  if (result.未登録.length) {
-    result.メモ += ' マスタに無い得意先が ' + result.未登録.length +
-      ' 件あります。得意先マスタに追加すると会社名が正確になります。';
+  // 未登録はコードごとにまとめる。同じ得意先が何件も並ぶと見づらく、
+  // マスタへ写すときにも邪魔になる。
+  var seen = {}, rows = [];
+  result.未登録.forEach(function (u) {
+    var key = u.コード;
+    if (seen[key]) { seen[key].件数++; return; }
+    seen[key] = { コード: key, OCRの名前: u.OCRの名前, 件数: 1, 例: u.元 };
+    rows.push(seen[key]);
+  });
+  result.未登録 = rows;
+
+  // そのままマスタに貼れる形。名前が崩れているものは直してから使う。
+  result.マスタ追記用 = rows
+    .filter(function (r) { return r.コード !== '読めず'; })
+    .map(function (r) { return r.コード + ',' + r.OCRの名前; });
+
+  if (rows.length) {
+    result.メモ += ' マスタに無い得意先が ' + rows.length +
+      ' 件あります。マスタ追記用 の行を得意先マスタに貼り、' +
+      '崩れている会社名を直してください。次回から正確になります。';
   }
 
   Logger.log(JSON.stringify(result, null, 2));
@@ -358,9 +375,13 @@ function parseCsv_(text) {
   return rows;
 }
 
-/** 出荷先の行から得意先コードだけを取る。 */
+/**
+ * 出荷先の行から得意先コードだけを取る。
+ * 区切りが無く漢字が続く形(8537株小国資源開発)があるため、
+ * 直後が英数字でなければ区切りとみなす。
+ */
 function extractCustomerCode_(text) {
-  var m = text.match(/出荷先[:：]\s*([0-9A-Za-z]{3,5})(?=[\s(（])/);
+  var m = text.match(/出荷先[:：]\s*(\d{3,5}|[A-Za-z]\d{2,4})(?![0-9A-Za-z])/);
   return m ? m[1].toUpperCase() : '';
 }
 
@@ -429,11 +450,12 @@ function extractDestination_(text) {
 
   var line = m[1].replace(/\s+/g, ' ').trim();
 
-  // 先頭の得意先コードを落とす。空白が無い場合がある(8537(株小国資源開発)。
-  // 実際の形は4文字(6757 / G737 / 8537 / 0820)だが、OCR が桁を
-  // 読み違える余地を見て3〜5桁まで許す。会社名まで削らないよう、
-  // 直後が空白か括弧のときだけ落とす。
-  line = line.replace(/^(?:\d{3,5}|[A-Za-z]\d{2,4})(?=[\s(（])\s*/, '');
+  // 先頭の得意先コードを落とす。区切りが無いことがある
+  // (8537(株小国資源開発 / 8537株小国資源開発)。
+  // 実際の形は4文字(6757 / G737 / 8537 / 3580 / H860)だが、OCR が桁を
+  // 読み違える余地を見て3〜5桁まで許す。直後が英数字でなければ
+  // 区切りとみなす(漢字が続く形があるため)。
+  line = line.replace(/^(?:\d{3,5}|[A-Za-z]\d{2,4})(?![0-9A-Za-z])\s*/, '');
 
   return sanitizeName_(line);
 }
