@@ -4,6 +4,14 @@
  * 共有ドライブ内のPDFを開き、Apple Pencilで書き込んだ結果を
  * 上書き保存 / 別名保存する。
  *
+ * 対象フォルダはサブフォルダを持てる。たとえば
+ *   ◆容器種類別/
+ *   ├── 30Ｋ/            … PDFが直接入っている
+ *   └── 小型容器/
+ *       ├── 10Ｋ/        … さらに1階層深い
+ *       └── ２Ｋ/
+ * のように深さがまちまちでも、たどって開ける。
+ *
  * 必要な設定:
  *   1. サービス → Drive API (v3) を「Drive」という識別子で追加
  *   2. 下の DEFAULT_FOLDER_ID を対象フォルダに変更(アプリ内からも変更可)
@@ -11,10 +19,21 @@
  *      実行ユーザー: 自分 / アクセス: 組織内の全員
  */
 
-// 出荷作業指図書が入っているフォルダ
-var DEFAULT_FOLDER_ID = '1d3SMlkQKuTEP-FmQB5zl9wTtKeXGGpN6';
+// 出荷作業指図書が入っているルートフォルダ(◆容器種類別)
+var DEFAULT_FOLDER_ID = '1qCpeKIO3gvPWkVDqXApVREDEiWKU_3D6';
 
-var PROP_FOLDER = 'TARGET_FOLDER_ID';
+// サブフォルダ対応にあたりキー名を変えている。
+// 以前の TARGET_FOLDER_ID に残っていた値は参照されなくなる。
+var PROP_FOLDER = 'ROOT_FOLDER_ID';
+
+var FOLDER_MIME = 'application/vnd.google-apps.folder';
+var PDF_MIME    = 'application/pdf';
+
+// 探索の上限(暴走防止)
+var MAX_FOLDERS    = 300;  // 検索で下る最大フォルダ数
+var MAX_HITS       = 200;  // 検索結果の最大件数
+var MAX_LIST_PAGES = 10;   // 1フォルダあたりの最大ページ数
+var MAX_DEPTH      = 10;   // パンくずをたどる最大段数
 
 
 function doGet() {
@@ -35,6 +54,11 @@ function include(name) {
 function getFolderId_() {
   var p = PropertiesService.getScriptProperties().getProperty(PROP_FOLDER);
   return p || DEFAULT_FOLDER_ID;
+}
+
+/** Driveのクエリ文字列に値を埋めるためのエスケープ。 */
+function q_(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
 function setFolderId(folderId) {
@@ -59,49 +83,175 @@ function getFolderInfo() {
 }
 
 
-/* ---------------- 一覧 ---------------- */
+/* ---------------- 一覧(1階層ぶん) ---------------- */
 
 /**
- * 対象フォルダ内のPDFを新しい順に返す。
- * @param {string} keyword ファイル名の絞り込み(省略可)
+ * フォルダの中身を返す。サブフォルダとPDFを分けて返し、
+ * ルートまでのパンくずも添える。
+ * @param {string} folderId 省略時はルートフォルダ
  */
-function listPdfs(keyword) {
-  var folderId = getFolderId_();
-  var q = "'" + folderId + "' in parents and mimeType = 'application/pdf' and trashed = false";
+function listFolder(folderId) {
+  var root = getFolderId_();
+  var id = String(folderId || '').trim() || root;
 
-  if (keyword) {
-    var safe = String(keyword).replace(/'/g, "\\'");
-    q += " and name contains '" + safe + "'";
+  var meta = Drive.Files.get(id, {
+    supportsAllDrives: true,
+    fields: 'id,name,parents,mimeType'
+  });
+  if (meta.mimeType !== FOLDER_MIME) throw new Error('フォルダではありません: ' + meta.name);
+
+  var folders = [], files = [];
+  var token = null, pages = 0;
+
+  do {
+    var res = Drive.Files.list({
+      q: "'" + q_(id) + "' in parents and trashed = false" +
+         " and (mimeType = '" + FOLDER_MIME + "' or mimeType = '" + PDF_MIME + "')",
+      orderBy: 'folder,modifiedTime desc',
+      pageSize: 200,
+      pageToken: token || undefined,
+      fields: 'nextPageToken,files(id,name,size,modifiedTime,mimeType)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true
+    });
+
+    (res.files || []).forEach(function (f) {
+      if (f.mimeType === FOLDER_MIME) {
+        folders.push({ id: f.id, name: f.name });
+      } else {
+        files.push({
+          id: f.id,
+          name: f.name,
+          size: Number(f.size || 0),
+          modified: f.modifiedTime
+        });
+      }
+    });
+
+    token = res.nextPageToken;
+  } while (token && ++pages < MAX_LIST_PAGES);
+
+  return {
+    id: meta.id,
+    name: meta.name,
+    isRoot: id === root,
+    breadcrumb: breadcrumb_(meta, root),
+    folders: folders,
+    files: files
+  };
+}
+
+/** ルートフォルダまで親をたどる。ルート外にいる場合は現在地だけ返す。 */
+function breadcrumb_(meta, root) {
+  var crumb = [{ id: meta.id, name: meta.name }];
+  var cur = meta, depth = 0;
+
+  while (cur.id !== root && depth++ < MAX_DEPTH) {
+    var pid = (cur.parents || [])[0];
+    if (!pid) break;
+    try {
+      cur = Drive.Files.get(pid, { supportsAllDrives: true, fields: 'id,name,parents' });
+    } catch (e) {
+      break; // 共有ドライブの上限などで親を取れない場合はそこで打ち切る
+    }
+    crumb.unshift({ id: cur.id, name: cur.name });
+    if (cur.id === root) break;
+  }
+  return crumb;
+}
+
+/** 後方互換: ルート直下のPDFだけを返す。 */
+function listPdfs() {
+  return listFolder('').files;
+}
+
+
+/* ---------------- 検索(サブフォルダ横断) ---------------- */
+
+/**
+ * ルートフォルダ配下をすべて辿ってファイル名で検索する。
+ * @param {string} keyword
+ */
+function searchPdfs(keyword) {
+  keyword = String(keyword || '').trim();
+  if (!keyword) return [];
+
+  var root = getFolderId_();
+  var ids = collectFolderIds_(root);
+
+  var out = [], seen = {};
+
+  for (var i = 0; i < ids.length && out.length < MAX_HITS; i += 20) {
+    var parents = ids.slice(i, i + 20).map(function (p) {
+      return "'" + q_(p) + "' in parents";
+    }).join(' or ');
+
+    var res = Drive.Files.list({
+      q: '(' + parents + ") and mimeType = '" + PDF_MIME + "' and trashed = false" +
+         " and name contains '" + q_(keyword) + "'",
+      orderBy: 'modifiedTime desc',
+      pageSize: 100,
+      fields: 'files(id,name,size,modifiedTime)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true
+    });
+
+    (res.files || []).forEach(function (f) {
+      if (seen[f.id]) return;
+      seen[f.id] = true;
+      out.push({
+        id: f.id,
+        name: f.name,
+        size: Number(f.size || 0),
+        modified: f.modifiedTime
+      });
+    });
   }
 
-  var res = Drive.Files.list({
-    q: q,
-    orderBy: 'modifiedTime desc',
-    pageSize: 100,
-    fields: 'files(id,name,size,modifiedTime)',
-    supportsAllDrives: true,
-    includeItemsFromAllDrives: true
-  });
+  out.sort(function (a, b) { return a.modified < b.modified ? 1 : -1; });
+  return out.slice(0, MAX_HITS);
+}
 
-  return (res.files || []).map(function (f) {
-    return {
-      id: f.id,
-      name: f.name,
-      size: Number(f.size || 0),
-      modified: f.modifiedTime
-    };
-  });
+/** ルートとその配下のフォルダIDを幅優先で集める。 */
+function collectFolderIds_(root) {
+  var ids = [root], queue = [root];
+
+  while (queue.length && ids.length < MAX_FOLDERS) {
+    var parents = queue.splice(0, 20).map(function (p) {
+      return "'" + q_(p) + "' in parents";
+    }).join(' or ');
+
+    var res = Drive.Files.list({
+      q: '(' + parents + ") and mimeType = '" + FOLDER_MIME + "' and trashed = false",
+      pageSize: 200,
+      fields: 'files(id)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true
+    });
+
+    (res.files || []).forEach(function (f) {
+      if (ids.length >= MAX_FOLDERS) return;
+      ids.push(f.id);
+      queue.push(f.id);
+    });
+  }
+  return ids;
 }
 
 
 /* ---------------- 読み込み ---------------- */
 
 function loadPdf(fileId) {
-  var file = DriveApp.getFileById(fileId);
-  var blob = file.getBlob();
+  var meta = Drive.Files.get(fileId, {
+    supportsAllDrives: true,
+    fields: 'id,name,mimeType,size'
+  });
+  if (meta.mimeType !== PDF_MIME) throw new Error('PDFではありません: ' + meta.name);
+
+  var blob = DriveApp.getFileById(fileId).getBlob();
   return {
     id: fileId,
-    name: file.getName(),
+    name: meta.name,
     data: Utilities.base64Encode(blob.getBytes())
   };
 }
@@ -128,7 +278,7 @@ function savePdf(req) {
       fields: 'id,name,parents'
     });
 
-    var blob = Utilities.newBlob(bytes, 'application/pdf', original.name);
+    var blob = Utilities.newBlob(bytes, PDF_MIME, original.name);
 
     if (req.mode === 'overwrite') {
       var updated = Drive.Files.update({}, req.fileId, blob, { supportsAllDrives: true });
