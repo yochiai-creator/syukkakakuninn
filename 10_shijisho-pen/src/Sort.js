@@ -321,6 +321,51 @@ function setupCustomerMaster() {
   };
 }
 
+/**
+ * 得意先マスタに行を足す。既にあるコードは上書きする。
+ *
+ *   addCustomerMaster([['8537','㈱小国資源開発'], ['0820','ひかり工機']])
+ *
+ * 書き込みも CSV を Drive に被せる形で行う。SpreadsheetApp を使うと
+ * spreadsheets スコープが要り、再認可でウェブアプリにも影響が出る。
+ * 既存の行は読み直して残すので、手で入れたものは消えない。
+ */
+function addCustomerMaster(rows) {
+  if (!rows || !rows.length) throw new Error('追加する行を指定してください');
+
+  var id = PropertiesService.getScriptProperties().getProperty(PROP_MASTER_SHEET);
+  if (!id) throw new Error('先に setupCustomerMaster を実行してください');
+
+  customerMasterCache_ = null;          // 手で編集されている場合に備えて読み直す
+  var map = loadCustomerMaster_();
+  var added = [];
+
+  rows.forEach(function (r) {
+    var code = String(r[0] || '').trim().toUpperCase();
+    var name = String(r[1] || '').trim();
+    if (!code || !name) return;
+    added.push(code + ' → ' + name);
+    map[code] = name;
+  });
+
+  var csv = '得意先コード,会社名\n' + Object.keys(map).sort().map(function (k) {
+    return csvCell_(k) + ',' + csvCell_(map[k]);
+  }).join('\n') + '\n';
+
+  Drive.Files.update({}, id, Utilities.newBlob(csv, 'text/csv', 'master.csv'),
+                     { supportsAllDrives: true });
+
+  customerMasterCache_ = null;
+  Logger.log(JSON.stringify({ 追加: added, マスタ件数: Object.keys(map).length }, null, 2));
+  return { 追加: added, マスタ件数: Object.keys(map).length };
+}
+
+/** CSV の1セル。区切りや引用符を含むときだけ囲う。 */
+function csvCell_(v) {
+  v = String(v);
+  return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+}
+
 /** マスタを読み込む。1回の実行につき1度だけ取りに行く。 */
 var customerMasterCache_ = null;
 
