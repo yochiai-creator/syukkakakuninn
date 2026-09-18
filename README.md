@@ -19,7 +19,7 @@ bash dash.sh run    # 足りないものを全部やる
 | `clasp create --type webapp --title "指図書 書き込み" --rootDir ./src` | ○ |
 | `~/Downloads` から `src/` へコピー（`Code.gs` → `Code.js`） | ○ |
 | `appsscript.json` の `webapp.access=DOMAIN` / Drive v3 の確認と補正 | ○ |
-| `clasp push` → `clasp open` | ○ |
+| `clasp push` → エディタを開く | ○ |
 | node / clasp の導入、`clasp login` | ✗ 手動 |
 
 `~/Downloads` 以外に3ファイルがある場合は場所を指定する。

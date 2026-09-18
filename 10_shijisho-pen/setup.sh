@@ -16,8 +16,11 @@ warn() { printf '\033[33m[warn]\033[0m %s\n' "$1"; }
 die()  { printf '\033[31m[error]\033[0m %s\n' "$1" >&2; exit 1; }
 
 # ---- 事前チェック -------------------------------------------------
+command -v node  >/dev/null 2>&1 || die "node が見つかりません。"
 command -v clasp >/dev/null 2>&1 || die "clasp が見つかりません。 npm i -g @google/clasp"
-[ -f "$HOME/.clasprc.json" ] || die "clasp が未ログインです。 clasp login を先に実行してください。"
+CLASP_MAJOR="$(clasp --version 2>/dev/null | grep -oE '^[0-9]+' || echo 0)"
+if [ -f "$HOME/.clasprc.json" ] || clasp show-authorized-user >/dev/null 2>&1; then :
+else die "clasp が未ログインです。 clasp login を先に実行してください。"; fi
 [ -d "$DL" ] || die "$DL がありません。DOWNLOADS_DIR=... で場所を指定してください。"
 
 # ---- 1. clasp create ---------------------------------------------
@@ -43,6 +46,10 @@ copy_one() { # $1=元ファイル名 $2=コピー先ファイル名
 copy_one "Code.gs"         "Code.js"
 copy_one "Index.html"      "Index.html"
 copy_one "appsscript.json" "appsscript.json"
+
+for f in Code.js Index.html; do
+  [ -f "$SRC/$f" ] || die "src/$f がありません。$DL に元ファイルを置いてから再実行してください。"
+done
 
 # ---- 3. appsscript.json の確認 / 補正 -----------------------------
 step "3. appsscript.json の確認 (webapp.access=DOMAIN / Drive v3)"
@@ -108,7 +115,12 @@ fi
 step "4. clasp push"
 ( cd "$HERE" && clasp push --force )
 
-step "clasp open"
-( cd "$HERE" && clasp open )
+step "エディタを開く"
+# clasp v3 で `clasp open` は廃止され `open-script` に変わった
+if [ "$CLASP_MAJOR" -ge 3 ]; then
+  ( cd "$HERE" && clasp open-script )
+else
+  ( cd "$HERE" && clasp open )
+fi
 
 printf '\n\033[32m完了\033[0m: %s\n' "$SRC"

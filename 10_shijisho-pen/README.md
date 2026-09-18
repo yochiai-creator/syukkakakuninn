@@ -22,7 +22,7 @@ bash 10_shijisho-pen/setup.sh
    Downloads が別の場所なら `DOWNLOADS_DIR=/path/to/dir bash 10_shijisho-pen/setup.sh`
 3. `src/appsscript.json` を検査し、`webapp.access = DOMAIN` と
    `dependencies` の Drive v3 を確認。不足していれば補正して内容を表示する。
-4. `clasp push --force` → `clasp open`
+4. `clasp push --force` → エディタを開く
 
 ## ファイル構成
 
@@ -39,3 +39,14 @@ bash 10_shijisho-pen/setup.sh
 
 `src/appsscript.json` はひな形として先に置いてある。`~/Downloads` に
 `appsscript.json` が無い場合はこれがそのまま使われる。
+
+## 注意: clasp のバージョン
+
+clasp v3 で `clasp open` は廃止され `clasp open-script` になった。
+`setup.sh` は `clasp --version` を見て v3 以上なら `open-script`、v2 なら `open` を呼ぶ。
+手で叩く場合も同様に読み替えること。
+
+| 操作 | clasp v2 | clasp v3 |
+|---|---|---|
+| エディタを開く | `clasp open` | `clasp open-script` |
+| プロジェクト作成 | `clasp create` | `clasp create`（`create-script` の別名・オプション同じ）|
