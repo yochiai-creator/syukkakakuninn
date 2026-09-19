@@ -8,7 +8,7 @@
     --ink:#16181d;
     --paper:#e8e6e0;
     --panel:#f7f6f3;
-    --line:#c9c6bd;
+    --stamp:#d8352a; --line:#c9c6bd;
     --accent:#0b6b5e;
     --shadow:0 1px 3px rgba(20,22,26,.16), 0 8px 24px rgba(20,22,26,.10);
   }
@@ -78,6 +78,8 @@
   .sep{width:1px; height:26px; background:var(--line); flex:0 0 auto;}
   #pageLbl{font-variant-numeric:tabular-nums; padding:0 6px; font-size:14px;}
   #zoomLbl{font-variant-numeric:tabular-nums; min-width:58px;}
+  #stamps button{color:var(--stamp); font-weight:600; padding:8px 10px;}
+  #stamps button.on{background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.14);}
   #dirty{color:#b25000; font-size:13px; padding:0 2px; display:none;}
   #dirty.show{display:inline;}
 
@@ -167,6 +169,12 @@
     <button class="swatch on" data-color="#d32f2f" style="background:#d32f2f"></button>
     <button class="swatch" data-color="#16181d" style="background:#16181d"></button>
     <button class="swatch" data-color="#1565c0" style="background:#1565c0"></button>
+  </div>
+
+  <div class="grp" id="stamps">
+    <button data-stamp="前田">前田</button>
+    <button data-stamp="森">森</button>
+    <button data-stamp="落合">落合</button>
   </div>
 
   <div class="grp" id="sizes">
@@ -260,6 +268,7 @@ var view={w:0,h:0,dpr:1};
 var zoom=1, fitScale=1;
 var MIN_ZOOM=1, MAX_ZOOM=6;
 var tool="pen", color="#d32f2f", size=2.2;
+var STAMP_COLOR="#d8352a";   // 朱色
 var penSeen=false, drawing=null;
 
 /* ---------- toast ---------- */
@@ -294,7 +303,23 @@ function group(sel, attr, fn){
     });
   });
 }
-group("#tools","tool", function(v){ tool=v; });
+group("#tools","tool", function(v){
+  tool=v;
+  document.querySelectorAll("#stamps button").forEach(function(b){ b.classList.remove("on"); });
+});
+
+/* ハンコ。名前を押すとその印が選ばれ、紙を押した場所に捺される。
+   ペンなどに戻すときは道具のボタンを押す。 */
+var stampName="前田";
+document.querySelectorAll("#stamps button").forEach(function(b){
+  b.addEventListener("click", function(){
+    document.querySelectorAll("#stamps button").forEach(function(x){ x.classList.remove("on"); });
+    document.querySelectorAll("#tools button").forEach(function(x){ x.classList.remove("on"); });
+    b.classList.add("on");
+    tool="stamp";
+    stampName=b.dataset.stamp;
+  });
+});
 group("#colors","color", function(v){ color=v; });
 group("#sizes","size", function(v){ size=parseFloat(v); });
 
@@ -680,6 +705,7 @@ stage.addEventListener("pointercancel", endTouch);
 
 /* ---------- ink ---------- */
 function paint(ctx, m, W, H, s){
+  if(m.type==="stamp"){ paintStamp(ctx, m, W, H); return; }
   ctx.lineCap="round"; ctx.lineJoin="round"; ctx.strokeStyle=m.color;
   if(m.type==="check"){
     var u=m.size*s*1.15;
@@ -709,6 +735,34 @@ function paint(ctx, m, W, H, s){
   }
 }
 
+/* 認印ふうの丸印。大きさは紙の幅に対する割合で決めるので、
+   画面でも書き出したPDFでも同じ比率になる。 */
+function paintStamp(ctx, m, W, H){
+  var R  = W * 0.024;
+  var cx = m.x*W, cy = m.y*H;
+  var chars = String(m.name||"").split("");
+
+  ctx.save();
+  ctx.strokeStyle = STAMP_COLOR;
+  ctx.fillStyle   = STAMP_COLOR;
+  ctx.lineWidth   = Math.max(1, R*0.13);
+
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, Math.PI*2);
+  ctx.stroke();
+
+  var fs = chars.length>1 ? R*0.70 : R*1.05;
+  ctx.font = "bold " + fs + "px 'Hiragino Mincho ProN','Yu Mincho',serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  var gap = fs*1.04;
+  var y0 = cy - gap*(chars.length-1)/2;
+  chars.forEach(function(c,i){ ctx.fillText(c, cx, y0 + gap*i); });
+
+  ctx.restore();
+}
+
 function redraw(){
   inkCtx.setTransform(view.dpr,0,0,view.dpr,0,0);
   inkCtx.clearRect(0,0,view.w,view.h);
@@ -730,7 +784,7 @@ function hitErase(pt){
   var list=marks[pageNo]||[], R=0.016*Math.max(view.w, view.h);
   for(var i=list.length-1;i>=0;i--){
     var m=list[i];
-    var pts = m.type==="check" ? [{x:m.x,y:m.y}] : m.pts;
+    var pts = m.pts ? m.pts : [{x:m.x, y:m.y}];
     for(var j=0;j<pts.length;j++){
       var dx=(pts[j].x-pt.x)*view.w, dy=(pts[j].y-pt.y)*view.h;
       if(Math.sqrt(dx*dx+dy*dy) < R){ list.splice(i,1); return true; }
@@ -750,6 +804,10 @@ inkCv.addEventListener("pointerdown", function(e){
   var pt=pos(e);
   marks[pageNo]=marks[pageNo]||[];
 
+  if(tool==="stamp"){
+    marks[pageNo].push({type:"stamp", name:stampName, x:pt.x, y:pt.y});
+    setDirty(true); redraw(); return;
+  }
   if(tool==="check"){
     marks[pageNo].push({type:"check", color:color, size:size, x:pt.x, y:pt.y});
     setDirty(true); redraw(); return;
