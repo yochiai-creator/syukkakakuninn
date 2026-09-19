@@ -22,11 +22,30 @@
   }
 
   /* ---------- toolbar ---------- */
+  /* 保存は常に見えていること。道具が増えても押せなくならないよう、
+     横に溢れるのは中央の道具だけにして、保存は右端に固定する。 */
   #bar{
     flex:0 0 auto; display:flex; align-items:center; gap:6px;
     padding:8px 10px; padding-top:max(8px, env(safe-area-inset-top));
     background:var(--panel); border-bottom:1px solid var(--line);
-    overflow-x:auto; overflow-y:hidden; white-space:nowrap;
+    overflow:hidden; white-space:nowrap;
+  }
+  #barScroll{
+    flex:1 1 auto; min-width:0;
+    display:flex; align-items:center; gap:6px;
+    overflow-x:auto; overflow-y:hidden;
+    -webkit-overflow-scrolling:touch;
+    scrollbar-width:none;
+  }
+  #barScroll::-webkit-scrollbar{display:none;}
+  #barSave{
+    flex:0 0 auto; display:flex; align-items:center; gap:6px;
+    padding-left:8px; margin-left:2px; border-left:1px solid var(--line);
+  }
+  /* 画面が狭いときは保存まわりを詰める */
+  @media (max-width:820px){
+    #barSave button{padding:8px 10px;}
+    #bar{gap:4px;}
   }
   .grp{display:flex; align-items:center; gap:4px; padding:3px;
        border-radius:9px; background:#ece9e3; flex:0 0 auto;}
@@ -48,7 +67,7 @@
   .sep{width:1px; height:26px; background:var(--line); flex:0 0 auto;}
   #pageLbl{font-variant-numeric:tabular-nums; padding:0 6px; font-size:14px;}
   #zoomLbl{font-variant-numeric:tabular-nums; min-width:58px;}
-  #dirty{color:#b25000; font-size:13px; padding:0 4px; display:none;}
+  #dirty{color:#b25000; font-size:13px; padding:0 2px; display:none;}
   #dirty.show{display:inline;}
 
   /* ---------- stage ---------- */
@@ -114,6 +133,8 @@
   <button id="browse" class="solid">ファイル</button>
   <div class="sep"></div>
 
+  <div id="barScroll">
+
   <div class="grp" id="tools">
     <button data-tool="pen" class="on">ペン</button>
     <button data-tool="check">レ点</button>
@@ -150,11 +171,14 @@
     <button id="zoomIn" disabled>&plus;</button>
   </div>
 
-  <div class="sep"></div>
-  <button id="saveCopy" disabled>別名で保存</button>
-  <button id="saveOver" disabled>上書き保存</button>
-  <button id="saveDone" class="solid" disabled>チェック完了</button>
-  <span id="dirty">未保存</span>
+  </div><!-- /barScroll -->
+
+  <div id="barSave">
+    <span id="dirty">未保存</span>
+    <button id="saveCopy" disabled>別名</button>
+    <button id="saveOver" disabled>上書き</button>
+    <button id="saveDone" class="solid" disabled>チェック完了</button>
+  </div>
 </div>
 
 <div id="stage">
