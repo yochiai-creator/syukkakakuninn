@@ -476,25 +476,17 @@ function applyZoom(z, cx, cy){
   });
 }
 
-/* 連続して呼ばれても描画が重ならないようにまとめる */
-var zooming=false, nextZoom=null;
-function queueZoom(z, cx, cy){
-  nextZoom={z:z, cx:cx, cy:cy};
-  if(zooming) return;
-  zooming=true;
-  (function step(){
-    var q=nextZoom; nextZoom=null;
-    if(!q){ zooming=false; return; }
-    applyZoom(q.z, q.cx, q.cy).then(function(){ requestAnimationFrame(step); });
-  })();
-}
-
 $("#zoomIn").onclick  = function(){ applyZoom(zoom*1.25); };
 $("#zoomOut").onclick = function(){ applyZoom(zoom/1.25); };
 $("#zoomLbl").onclick = function(){ applyZoom(1); };
 
 /* 2本指でつまむと拡大縮小、そのまま動かすと移動。
-   1本指とペンは描画に使うので触らない。 */
+   1本指とペンは描画に使うので触らない。
+
+   指を動かしている間は CSS の変形で追従させるだけにして、PDF の
+   再描画は指を離したときに一度だけ行う。動かすたびに再描画すると
+   キャンバスのリサイズとスクロール補正が重なって画面が震える。
+   変形中は少しぼやけるが、離した時点で綺麗に描き直される。 */
 var touches={}, pinch=null;
 
 function tdist(a,b){ var dx=a.x-b.x, dy=a.y-b.y; return Math.sqrt(dx*dx+dy*dy); }
@@ -507,12 +499,22 @@ stage.addEventListener("pointerdown", function(e){
   var ids=touchIds();
   if(ids.length===2 && !pinch){
     var a=touches[ids[0]], b=touches[ids[1]];
+    var mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
     var r=stage.getBoundingClientRect();
+
+    // つまみ始めに指の下にあった紙の上の点。これを指に追従させる。
     pinch={
-      d: tdist(a,b)||1, z: zoom,
-      cx: (a.x+b.x)/2 - r.left, cy: (a.y+b.y)/2 - r.top,
-      mx: (a.x+b.x)/2, my: (a.y+b.y)/2
+      d:  tdist(a,b)||1,
+      z:  zoom,
+      mx: mx, my: my,
+      px: (stage.scrollLeft + mx - r.left) - sheet.offsetLeft,
+      py: (stage.scrollTop  + my - r.top ) - sheet.offsetTop,
+      k:  1
     };
+
+    sheet.style.transformOrigin="0 0";
+    sheet.style.willChange="transform";
+
     // 2本目が触れた時点で、1本目が引きかけた線は取り消す
     // (拡大しようとしただけなので紙に跡を残さない)
     if(drawing && drawing.type==="stroke"){
@@ -534,20 +536,52 @@ stage.addEventListener("pointermove", function(e){
   e.preventDefault();
 
   var a=touches[ids[0]], b=touches[ids[1]];
-
-  // 中点の移動ぶんだけ紙を動かす
   var mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
-  stage.scrollLeft -= (mx - pinch.mx);
-  stage.scrollTop  -= (my - pinch.my);
-  pinch.mx=mx; pinch.my=my;
 
-  queueZoom(pinch.z * (tdist(a,b)/pinch.d), pinch.cx, pinch.cy);
+  // 拡大率は全体表示〜600%の範囲に収める
+  var k = tdist(a,b)/pinch.d;
+  k = Math.max(MIN_ZOOM/pinch.z, Math.min(MAX_ZOOM/pinch.z, k));
+  pinch.k = k;
+
+  // つまみ始めの点が今の指の位置に来るように寄せる。
+  // スクロールは触らない(端で止まって指とずれるため)。
+  var tx = (mx - pinch.mx) + (1-k)*pinch.px;
+  var ty = (my - pinch.my) + (1-k)*pinch.py;
+
+  sheet.style.transform = "translate("+tx+"px,"+ty+"px) scale("+k+")";
+  $("#zoomLbl").textContent = Math.round(pinch.z*k*100)+"%";
 }, {passive:false});
+
+/* 指を離したら、変形をやめて実際の倍率で描き直す */
+function commitPinch(){
+  var p=pinch; pinch=null;
+  if(!p) return;
+
+  var last = touches[touchIds()[0]];
+  var mx = last ? last.x : p.mx, my = last ? last.y : p.my;
+
+  sheet.style.transform="";
+  sheet.style.willChange="";
+
+  var next = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, p.z*p.k));
+  if(Math.abs(next-zoom) < 0.005){ updateZoomLbl(); return; }
+
+  var ratio = next/zoom;
+  zoom = next;
+
+  renderPage().then(function(){
+    // 描き直したあとの紙の位置は変わるので、取り直して合わせる
+    var r=stage.getBoundingClientRect();
+    stage.scrollLeft = sheet.offsetLeft + p.px*ratio - (mx - r.left);
+    stage.scrollTop  = sheet.offsetTop  + p.py*ratio - (my - r.top);
+    updateZoomLbl();
+  });
+}
 
 function endTouch(e){
   if(e.pointerType!=="touch") return;
   delete touches[e.pointerId];
-  if(Object.keys(touches).length<2) pinch=null;
+  if(pinch && Object.keys(touches).length<2) commitPinch();
 }
 stage.addEventListener("pointerup", endTouch);
 stage.addEventListener("pointercancel", endTouch);
