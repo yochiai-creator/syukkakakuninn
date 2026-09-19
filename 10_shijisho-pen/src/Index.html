@@ -791,18 +791,15 @@ function paintStamp(ctx, m, W, H){
   ctx.lineTo(cx + half*0.62, cy);
   ctx.stroke();
 
-  // 上段: 名前。籠文字(輪郭だけの中抜き)で描く
-  drawFitted_(ctx, m.name||"", cx, cy - R*0.45, R*1.30, R*0.56, true);
-
-  // 下段: 日付。小さいので中抜きにすると潰れる。塗りのまま
-  drawFitted_(ctx, m.date||"", cx, cy + R*0.47, R*1.40, R*0.40, false);
+  // 上段: 名前 / 下段: 日付。どちらも同じ籠文字体で塗りつぶす
+  drawFitted_(ctx, m.name||"", cx, cy - R*0.45, R*1.30, R*0.52);
+  drawFitted_(ctx, m.date||"", cx, cy + R*0.47, R*1.40, R*0.40);
 
   ctx.restore();
 }
 
-/* 指定の幅に収まるまで字を小さくして中央に描く。
-   hollow を立てると籠文字(輪郭だけの中抜き)になる。 */
-function drawFitted_(ctx, text, cx, cy, maxW, baseFs, hollow){
+/* 指定の幅に収まるまで字を小さくして中央に描く */
+function drawFitted_(ctx, text, cx, cy, maxW, baseFs){
   if(!text) return;
 
   var fs = baseFs;
@@ -812,15 +809,7 @@ function drawFitted_(ctx, text, cx, cy, maxW, baseFs, hollow){
     fs = fs * maxW / w;
     ctx.font = fs + "px " + STAMP_FONT;
   }
-
-  if(hollow){
-    ctx.lineWidth = Math.max(0.6, fs*0.075);
-    ctx.lineJoin  = "round";
-    ctx.miterLimit = 2;
-    ctx.strokeText(text, cx, cy);
-  } else {
-    ctx.fillText(text, cx, cy);
-  }
+  ctx.fillText(text, cx, cy);
 }
 
 /* 捺した日。26.9.19 の形 */
