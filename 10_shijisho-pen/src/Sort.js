@@ -755,6 +755,63 @@ function alreadyCopied_(prefix, doneNames) {
 }
 
 /**
+ * 振り分け済みのコピーのうち、出荷先がマスタの名前と一致しないものを探す。
+ * 消さずに一覧にするだけ。まずこれで中身を見てから trashGarbledCopies を使う。
+ *
+ * マスタに載っている得意先なら、正しい名前で入っていれば一致する。
+ * 一致しないものは OCR が崩れたまま入っているか、まだマスタに無い得意先。
+ */
+function listGarbledCopies() {
+  var found = scanCopies_();
+  Logger.log(JSON.stringify(found, null, 2));
+  return found;
+}
+
+/**
+ * 上で見つかったコピーをゴミ箱へ移す。元の指図書には触らない。
+ * 消したあと sortShippingOrders を実行すると、マスタを使って
+ * 正しい名前で入り直す。
+ */
+function trashGarbledCopies() {
+  var found = scanCopies_();
+  found.一致しない.forEach(function (r) {
+    DriveApp.getFileById(r.id).setTrashed(true);
+  });
+
+  var out = { 消した件数: found.一致しない.length, 残した件数: found.一致した件数,
+              一覧: found.一致しない.map(function (r) { return r.場所; }) };
+  Logger.log(JSON.stringify(out, null, 2));
+  return out;
+}
+
+/** 振り分け先を見て、マスタの名前と一致するか調べる。 */
+function scanCopies_() {
+  var index  = buildSizeIndex_(SORT_DEST_ROOT_ID);
+  var master = loadCustomerMaster_();
+
+  var known = {};
+  Object.keys(master).forEach(function (k) { known[master[k]] = true; });
+
+  var bad = [], ok = 0;
+
+  Object.keys(index).forEach(function (kg) {
+    var it = DriveApp.getFolderById(index[kg].id).getFiles();
+    while (it.hasNext()) {
+      var f = it.next(), name = f.getName();
+
+      // 26.09.25_26-60754-0(1)_会社名.pdf
+      var m = name.match(/^(\d{2}\.\d{2}\.\d{2})_([^_]+)_(.+)\.pdf$/i);
+      if (!m) { ok++; continue; }        // この形でないものは触らない
+
+      if (known[m[3]]) { ok++; continue; }
+      bad.push({ id: f.getId(), 場所: index[kg].path + '/' + name, 出荷先: m[3] });
+    }
+  });
+
+  return { 一致した件数: ok, 一致しない: bad, マスタ件数: Object.keys(master).length };
+}
+
+/**
  * ここに 日付_依頼No_ を並べて trashListedCopies を実行すると消える。
  * エディタの実行ボタンは引数を渡せないため、この形にしている。
  * 下は これまでの実行でできたコピー(二重ぶんを含む)。
