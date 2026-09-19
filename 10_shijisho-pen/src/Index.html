@@ -3,6 +3,9 @@
 <head>
 <base target="_top">
 <meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Reggae+One&display=swap">
 <style>
   :root{
     --ink:#16181d;
@@ -280,6 +283,14 @@ var zoom=1, fitScale=1;
 var MIN_ZOOM=1, MAX_ZOOM=6;
 var tool="pen", color="#d32f2f", size=2.2;
 var STAMP_COLOR="#d8352a";   // 朱色
+var STAMP_FONT="'Reggae One','Hiragino Mincho ProN','Yu Mincho',serif";  // 江戸文字
+
+/* フォントが届く前に描くと代替の字になるので、読めたら描き直す */
+if(document.fonts && document.fonts.load){
+  document.fonts.load("40px 'Reggae One'", "前田森落合").then(function(){
+    if(pdfDoc) redraw();
+  }).catch(function(){});
+}
 var penSeen=false, drawing=null;
 
 /* ---------- toast ---------- */
@@ -762,8 +773,9 @@ function paintStamp(ctx, m, W, H){
   ctx.arc(cx, cy, R, 0, Math.PI*2);
   ctx.stroke();
 
-  var fs = chars.length>1 ? R*0.70 : R*1.05;
-  ctx.font = "bold " + fs + "px 'Hiragino Mincho ProN','Yu Mincho',serif";
+  // 江戸文字は線が太いので、明朝より少し小さめにして丸に収める
+  var fs = chars.length>1 ? R*0.66 : R*1.00;
+  ctx.font = fs + "px " + STAMP_FONT;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
 
@@ -909,7 +921,11 @@ function closeFile(){
 
 function buildPdf(){
   var PDFDocument = PDFLib.PDFDocument;
-  return PDFDocument.load(srcBytes.slice()).then(function(out){
+  // ハンコの字がフォント未読込のまま焼き込まれないように待つ
+  var fontReady = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
+  return fontReady.then(function(){
+    return PDFDocument.load(srcBytes.slice());
+  }).then(function(out){
     var pages=out.getPages();
     var keys=Object.keys(marks).filter(function(k){ return (marks[k]||[]).length; });
 
