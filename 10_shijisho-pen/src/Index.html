@@ -129,6 +129,17 @@
              padding-bottom:max(12px, env(safe-area-inset-bottom));}
   .msg{padding:18px 16px; color:#6b6e75; font-size:14px; line-height:1.7;}
 
+  /* 確認ダイアログ。confirm() は別オリジンの埋め込み枠では
+     ブロックされて即 false が返るため、画面内に作る。 */
+  #ask{position:fixed; inset:0; z-index:40; display:grid; place-items:center;
+       background:rgba(20,22,26,.45); padding:20px;}
+  #ask[hidden]{display:none;}
+  .askBox{background:var(--panel); border-radius:14px; padding:20px;
+          max-width:min(460px, 100%); box-shadow:0 12px 40px rgba(0,0,0,.3);}
+  #askMsg{margin:0 0 18px; font-size:15px; line-height:1.7; white-space:pre-line;}
+  .askRow{display:flex; gap:8px; justify-content:flex-end;}
+  .askRow button{min-width:88px;}
+
   #toast{
     position:fixed; left:50%; bottom:26px; transform:translateX(-50%);
     background:var(--ink); color:#fff; padding:11px 17px; border-radius:8px;
@@ -220,6 +231,16 @@
   </div>
 </aside>
 
+<div id="ask" hidden>
+  <div class="askBox">
+    <p id="askMsg"></p>
+    <div class="askRow">
+      <button id="askNo">やめる</button>
+      <button id="askYes" class="solid">はい</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -249,6 +270,22 @@ function toast(msg){
 }
 
 /* ---------- toolbar ---------- */
+/* ---------- 確認ダイアログ ---------- */
+/* confirm() は使えない。別オリジンの埋め込み枠で動くため、
+   ブラウザがブロックして即 false を返す(押しても何も起きない)。 */
+var askFn=null;
+function ask(msg, onYes){
+  $("#askMsg").textContent = msg;
+  $("#ask").hidden = false;
+  askFn = onYes;
+}
+$("#askYes").onclick = function(){
+  $("#ask").hidden = true;
+  var f=askFn; askFn=null;
+  if(f) f();
+};
+$("#askNo").onclick = function(){ $("#ask").hidden = true; askFn=null; };
+
 function group(sel, attr, fn){
   document.querySelectorAll(sel+" button").forEach(function(b){
     b.addEventListener("click", function(){
@@ -269,17 +306,17 @@ $("#undo").onclick = function(){
 };
 $("#clear").onclick = function(){
   if(!(marks[pageNo]||[]).length) return;
-  if(confirm("このページの書き込みをすべて消しますか?")){
+  ask("このページの書き込みをすべて消しますか?", function(){
     marks[pageNo]=[]; setDirty(true); redraw();
-  }
+  });
 };
 $("#saveOver").onclick = function(){ save("overwrite"); };
 $("#saveCopy").onclick = function(){ save("copy"); };
 $("#saveDone").onclick = function(){
   if(!curFile) return;
-  if(!confirm("チェック完了として ◆チェック完了 に保存します。\n\n保存後、元の "
-    + curFile.name + " はゴミ箱へ移動します。\n(30日間は Drive のゴミ箱から戻せます)\n\nよろしいですか?")) return;
-  save("done");
+  ask("チェック完了として ◆チェック完了 に保存します。\n\n保存後、元の "
+    + curFile.name + " はゴミ箱へ移動します。\n(30日間は Drive のゴミ箱から戻せます)",
+    function(){ save("done"); });
 };
 
 function setDirty(v){
@@ -414,7 +451,15 @@ function b64ToBytes(b64){
 }
 
 function openFile(f){
-  if(dirty && !confirm("未保存の書き込みがあります。破棄して別のファイルを開きますか?")) return;
+  if(dirty){
+    ask("未保存の書き込みがあります。\n破棄して別のファイルを開きますか?",
+        function(){ doOpenFile(f); });
+    return;
+  }
+  doOpenFile(f);
+}
+
+function doOpenFile(f){
   closeDrawer();
   toast("読み込み中…");
   google.script.run
