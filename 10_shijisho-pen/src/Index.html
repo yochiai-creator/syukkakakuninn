@@ -42,10 +42,21 @@
     flex:0 0 auto; display:flex; align-items:center; gap:6px;
     padding-left:8px; margin-left:2px; border-left:1px solid var(--line);
   }
-  /* 画面が狭いときは保存まわりを詰める */
-  @media (max-width:820px){
-    #barSave button{padding:8px 10px;}
-    #bar{gap:4px;}
+  /* 画面が狭いときは保存を下の段へ回す。
+     右端に固定したままだと、道具の幅がそのぶん削られて
+     ペンや色が窮屈になる。段を分ければ道具は全幅を使え、
+     保存も隠れない。 */
+  @media (max-width:900px){
+    #bar{flex-wrap:wrap; gap:4px;}
+    /* 1段目は ファイル + 道具。100% にすると ファイル が弾かれて
+       3段になるので、残り幅を使う指定にする */
+    #barScroll{order:1; flex:1 1 auto; min-width:0;}
+    #barSave{
+      order:2; width:100%; justify-content:flex-end;
+      border-left:0; margin-left:0; padding-left:0;
+      padding-top:6px; border-top:1px solid var(--line);
+    }
+    #bar > .sep{display:none;}
   }
   .grp{display:flex; align-items:center; gap:4px; padding:3px;
        border-radius:9px; background:#ece9e3; flex:0 0 auto;}
