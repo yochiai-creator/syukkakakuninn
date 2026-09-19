@@ -4,14 +4,14 @@
 <base target="_top">
 <meta charset="utf-8">
 <style>
-  /* ハンコ用の江戸文字。Reggae One から 前田森落合 の5文字だけを
-     抜き出して埋め込んである(約1.3KB)。外部に取りに行かないので、
+  /* ハンコ用の江戸文字。Reggae One から 前田森落合 と数字だけを
+     抜き出して埋め込んである(約2KB)。外部に取りに行かないので、
      社内から Google Fonts が塞がれていても字が変わらない。 */
   @font-face{
     font-family:'StampEdo';
     font-style:normal;
     font-weight:400;
-    src:url(data:font/woff2;base64,d09GMgABAAAAAAU0ABAAAAAACVQAAATeAAEZmgAAAAAAAAAAAAAAAAAAAAAAAAAAGYFSGyAcKgZgAFQRCAqHEIVsATYCJAMOCw4ABCAFg2wHIBckGA4biQcIjsJxL1qbTKb4xGPFw8ca7f3dPTMpQaydJ9UQr1pJYglaxStDZsjsz+NpL00KTsp2meiftptT+WDZvr9U7+Gl48dUkpBGqLRNqfTuJ50qpXNpYAlIxiPSKZQJ0AEGDzQWUo1ttuaYfooml5msIdGrz7uPEkAxhVYEzkxRBYKgg56dTJBy0klthJRTxqKHoAvGwkDQJdPFAik4AAmCDz9BJuEApAgi9pwNgOUHRJoCWD4CCK6IM6VGsWx2+WfCMTpZzZZM/2GKuyoFG1ABsx6DpUg+sKxHPAQg/w/EPEFCsFKS5F3uYXI/S09iE7BB8pDIASzjF8Y2xIUUgGIALB3mNsvrIWelckgmbvt/B5DdBQUgAMkELgLQjQMkQArUQwqjXxBygHI8LMRKJeLp3nWNGZL5P8c09mnb6p/TnUdd6X0CQscBG0mVUqoQqBxdpf8XxEc1ZVCAAsfBvAzvnDxCQLgIMUdEOARswuHsSgQP9Ke5DpxeErVWpdZoOFqVubvKVUsjBpkwBpo32klBo5BUyhsViOmOBFJEt7vKEMZIhYiB9mYGIfmpcJXRUqJPoQG108jELJW3mXk3piVkPM2ALmSNwmYLzEoRErQKSWXznpdr+DXaAyHaLDWRgl5CZO1hECoQrZQiGtAWrblypzsl8EOkwAdhtI+QyknonFl3QWOJq0xa4bpOK2lEozR5NzdoyxAtM0ldiYRk02Qu8jvPKbs9p16wO2/rlDKtxZI+S6G//D9JbDEnT7YCVH18ie2tXfo2vjFt2rzOc5OoGQd8JVksaNtIk/QNHLVK9EMavqqPU3Uoa8JaEhTeSK50Ez4baNevuMf68qcvljpNS7fHS1ewa2PtJEmBrtb2hilNh51IG/562rRBuZeag6Di2nmW0QEqHznaoa6SUS1Rs7uUT2mLZd+ZuWRq9hNFGFY7wnvWUHusagGb6S6R9PYMHdaurvUb70hCfP+0V2LFAINz2aS8Z+LqWcfjP+i7udj3MUlGj7D/LfCfkqURW7xx84gQ9gEjmTtbRFQ59yzZJZ546zHRP7GLNyu/lz+/nyeWM8QF/uRgOkEJ34Zdzl4AOfcN2OOqk4fGRFHE+fVk0bYlDsIHW0iX7SKx8JRLhdtWEXHpiDO8WLnOlvqYH2irOcSd8Nmhz4KM665E6QKJ/JKL2P1Th0Ph3n3t46Y13Bs3r3pS71l3t/h2L/HJ6Ddmf/ntqOyZvh74jtfdp5KZgc/KmbTLkdZiXfjoi5nqocOKTlcPiP4cMWvzgftXU8uPbt0SQWj2RABAANEyy3r70bE2u4yvPCH+AvArb3QGAL8vr3wC0/kdfgq3ASjEAgiQ3f1/QPoHpvmkpyB0iAAOBQlKKhTG+oXy8ebsBnpUpBEOy/gAvgLLh3F2w8ci8caHS/HLRwiIOB+bZ0jf4/ALG+SzsumpEz0tnS4ocWI2piCH1KgDaFWKMVEzxFYGK6XcOFdXhM7jTjrbqZB53IVt5TTRSmrpg892pRBFycosmoaVRRfdJ8AouUhvr7Po9KDZDhWBYpjUJvXsVOcKNZIa3eiQSpT0q1moPe7KJO1OYkVpxLDRdEVkytVLH4/wjsgyP2EXJSnpk2Rn+ldtUJnL5pRwXcB8DsSZjmrA/v0T4S9aCwC745O1WZBMmlIy) format('woff2');
+    src:url(data:font/woff2;base64,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) format('woff2');
   }
 
   :root{
@@ -294,7 +294,7 @@ var STAMP_FONT="'StampEdo','Hiragino Mincho ProN','Yu Mincho',serif";  // 江戸
 
 /* 埋め込みフォントも読み込みは非同期。読めたら描き直す */
 if(document.fonts && document.fonts.load){
-  document.fonts.load("40px 'StampEdo'", "前田森落合").then(function(){
+  document.fonts.load("40px 'StampEdo'", "前田森落合0123456789.").then(function(){
     if(pdfDoc) redraw();
   }).catch(function(){});
 }
@@ -764,33 +764,59 @@ function paint(ctx, m, W, H, s){
   }
 }
 
-/* 認印ふうの丸印。大きさは紙の幅に対する割合で決めるので、
-   画面でも書き出したPDFでも同じ比率になる。 */
+/* 日付印。丸を横線で二つに分け、上に名前、下にチェックした日を入れる。
+   大きさは紙の幅に対する割合で決めるので、画面でも書き出したPDFでも
+   同じ比率になる。 */
 function paintStamp(ctx, m, W, H){
-  var R  = W * 0.024;
+  var R  = W * 0.034;
   var cx = m.x*W, cy = m.y*H;
-  var chars = String(m.name||"").split("");
 
   ctx.save();
   ctx.strokeStyle = STAMP_COLOR;
   ctx.fillStyle   = STAMP_COLOR;
-  ctx.lineWidth   = Math.max(1, R*0.13);
+  ctx.textAlign   = "center";
+  ctx.textBaseline= "middle";
 
+  // 外枠
+  ctx.lineWidth = Math.max(1, R*0.10);
   ctx.beginPath();
   ctx.arc(cx, cy, R, 0, Math.PI*2);
   ctx.stroke();
 
-  // 江戸文字は線が太いので、明朝より少し小さめにして丸に収める
-  var fs = chars.length>1 ? R*0.66 : R*1.00;
-  ctx.font = fs + "px " + STAMP_FONT;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
+  // 上下を分ける線。円の内側に収まる長さにする
+  var half = R*0.93;
+  ctx.lineWidth = Math.max(1, R*0.06);
+  ctx.beginPath();
+  ctx.moveTo(cx - half*0.62, cy);
+  ctx.lineTo(cx + half*0.62, cy);
+  ctx.stroke();
 
-  var gap = fs*1.04;
-  var y0 = cy - gap*(chars.length-1)/2;
-  chars.forEach(function(c,i){ ctx.fillText(c, cx, y0 + gap*i); });
+  // 上段: 名前
+  drawFitted_(ctx, m.name||"", cx, cy - R*0.45, R*1.30, R*0.52);
+
+  // 下段: 日付
+  drawFitted_(ctx, m.date||"", cx, cy + R*0.47, R*1.40, R*0.40);
 
   ctx.restore();
+}
+
+/* 指定の幅に収まるまで字を小さくして中央に描く */
+function drawFitted_(ctx, text, cx, cy, maxW, baseFs){
+  if(!text) return;
+  var fs = baseFs;
+  ctx.font = fs + "px " + STAMP_FONT;
+  var w = ctx.measureText(text).width;
+  if(w > maxW){
+    fs = fs * maxW / w;
+    ctx.font = fs + "px " + STAMP_FONT;
+  }
+  ctx.fillText(text, cx, cy);
+}
+
+/* 捺した日。26.9.19 の形 */
+function stampDate(){
+  var d = new Date();
+  return (d.getFullYear() % 100) + "." + (d.getMonth()+1) + "." + d.getDate();
 }
 
 function redraw(){
@@ -835,7 +861,7 @@ inkCv.addEventListener("pointerdown", function(e){
   marks[pageNo]=marks[pageNo]||[];
 
   if(tool==="stamp"){
-    marks[pageNo].push({type:"stamp", name:stampName, x:pt.x, y:pt.y});
+    marks[pageNo].push({type:"stamp", name:stampName, date:stampDate(), x:pt.x, y:pt.y});
     setDirty(true); redraw(); return;
   }
   if(tool==="check"){
