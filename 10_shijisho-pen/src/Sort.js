@@ -216,9 +216,13 @@ function runMonth_(yearName, monthName, max) {
   while (files.hasNext()) {
     var file = files.next();
 
-    // 打ち切ったあとは数えるだけ。もう一度実行すれば続きから進む
+    // 打ち切ったあとは数えるだけ。もう一度実行すれば続きから進む。
+    // 日付はファイル名から取れるので、打ち切り後もここだけは見る。
+    // 見ないと、二度と対象にならない過去日まで「残り」に入って
+    // 実態とかけ離れた数になる。
     if (done >= max || Date.now() - sortStarted_ > SORT_TIME_BUDGET_MS) {
-      result.残り++;
+      if (SORT_SKIP_PAST && isPastFile_(file.getName())) result.対象外++;
+      else result.残り++;
       continue;
     }
 
@@ -410,10 +414,27 @@ function setupCustomerMaster() {
  * 既に入っているコードは新しい方で上書きされる。
  */
 var CUSTOMER_ROWS = [
+  // 指図書の原本で確認済み
   ['8537', '㈱小国資源開発'],
   ['0820', 'ひかり工機'],
   ['3580', '(株)サイサン 磐田工場'],
-  ['C942', '福岡LPGセンター(株)福岡西事業所']
+  ['C942', '福岡LPGセンター(株)福岡西事業所'],
+  ['J177', '中部プロパン株式会社供給管理センター'],
+  ['4108', '(株)ホームエネルギー北陸 能登センター'],
+  ['8515', '(株)ホームエネルギー南九州 熊本センター'],
+
+  // 複数回とも同じに読めており、内容の確認も取れたもの
+  ['6757', '株式会社チョープロ 大島営業所'],
+  ['G757', '株式会社チョープロ 大島営業所'],   // 6 を G と誤読する分
+  ['B070', '東邦液化ガス(株)岡崎充填所'],
+  ['H860', '(株)ホームエネルギー近畿 田辺センター'],
+  ['6182', 'JA全農とっとり 資材部 生活燃料課'],
+
+  // 読めてはいるが原本での確認は未了。違っていれば直すこと
+  ['6862', '(株)アストモスガスセンター広島 福山営業所'],
+  ['5906', '岩谷産業株式会社 淡路工場'],
+  ['J450', 'イワタニ四国(株)徳島支店'],
+  ['B035', '東邦液化ガス株式会社 八開充填所']
 ];
 
 /** 上の CUSTOMER_ROWS をマスタに登録する。エディタから実行できる。 */
@@ -488,6 +509,12 @@ function showCustomerMaster() {
   var rows = Object.keys(map).sort().map(function (k) { return k + ' → ' + map[k]; });
   Logger.log(JSON.stringify({ 件数: rows.length, 一覧: rows }, null, 2));
   return { 件数: rows.length, 一覧: rows };
+}
+
+/** ファイル名の日付を見て、出荷日が当日以前かどうか。読めなければ対象扱い。 */
+function isPastFile_(name) {
+  var m = name.match(/_(\d{2}\.\d{2}\.\d{2})_/);
+  return m ? shipDateNum_(m[1]) <= sortTodayNum_ : false;
 }
 
 /** '26.09.25' を 20260925 にする。比較しやすい形にするだけ。 */
