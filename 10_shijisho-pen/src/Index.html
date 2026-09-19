@@ -736,9 +736,13 @@ stage.addEventListener("pointercancel", endTouch);
 function paint(ctx, m, W, H, s){
   if(m.type==="stamp"){ paintStamp(ctx, m, W, H); return; }
   ctx.lineCap="round"; ctx.lineJoin="round"; ctx.strokeStyle=m.color;
+
+  // 紙の幅に対する比率から実寸を出す。rel を持たない古い印は従来どおり
+  var unit = m.rel ? m.rel*W : m.size*s;
+
   if(m.type==="check"){
-    var u=m.size*s*1.15;
-    ctx.lineWidth=Math.max(1.4, m.size*s*0.85);
+    var u=unit*1.15;
+    ctx.lineWidth=Math.max(1.4, unit*0.85);
     ctx.beginPath();
     ctx.moveTo(m.x*W - u*1.9, m.y*H - u*0.2);
     ctx.lineTo(m.x*W - u*0.5, m.y*H + u*1.5);
@@ -750,13 +754,13 @@ function paint(ctx, m, W, H, s){
   if(p.length===1){
     ctx.fillStyle=m.color;
     ctx.beginPath();
-    ctx.arc(p[0].x*W, p[0].y*H, Math.max(.6, m.size*s*p[0].p/2), 0, 7);
+    ctx.arc(p[0].x*W, p[0].y*H, Math.max(.6, unit*p[0].p/2), 0, 7);
     ctx.fill();
     return;
   }
   for(var i=1;i<p.length;i++){
     var a=p[i-1], b=p[i];
-    ctx.lineWidth=Math.max(.5, m.size*s*(a.p+b.p)/2);
+    ctx.lineWidth=Math.max(.5, unit*(a.p+b.p)/2);
     ctx.beginPath();
     ctx.moveTo(a.x*W, a.y*H);
     ctx.lineTo(b.x*W, b.y*H);
@@ -831,6 +835,18 @@ function pos(e){
   var r=inkCv.getBoundingClientRect();
   return {x:(e.clientX-r.left)/r.width, y:(e.clientY-r.top)/r.height};
 }
+/* 太さを紙の幅に対する比率で持つ。画面のピクセル数のままだと、
+   拡大して書いた線が縮小したときに相対的に太くなる。
+
+   比率は「全体表示のときの紙の幅」を基準にする。view.w は今の倍率での
+   幅なので、倍率で割って全体表示のときの幅に直してから比を取る。
+   こうすると、どの倍率で書いても紙の上の太さは同じになる。
+   実際のペンが、近づいて見ても紙に引く線の太さは変わらないのと同じ。 */
+function sizeRel(){
+  var base = view.w ? view.w / (zoom || 1) : 800;   // 全体表示のときの紙の幅
+  return size / base;
+}
+
 function pressure(e){
   if(e.pointerType!=="pen") return 1;
   return 0.45 + Math.min(1, e.pressure||0.5)*0.9;
@@ -864,7 +880,7 @@ inkCv.addEventListener("pointerdown", function(e){
     setDirty(true); redraw(); return;
   }
   if(tool==="check"){
-    marks[pageNo].push({type:"check", color:color, size:size, x:pt.x, y:pt.y});
+    marks[pageNo].push({type:"check", color:color, size:size, rel:sizeRel(), x:pt.x, y:pt.y});
     setDirty(true); redraw(); return;
   }
   if(tool==="erase"){
@@ -872,7 +888,8 @@ inkCv.addEventListener("pointerdown", function(e){
     if(hitErase(pt)){ setDirty(true); redraw(); }
     return;
   }
-  drawing={type:"stroke", color:color, size:size, pts:[{x:pt.x, y:pt.y, p:pressure(e)}]};
+  drawing={type:"stroke", color:color, size:size, rel:sizeRel(),
+           pts:[{x:pt.x, y:pt.y, p:pressure(e)}]};
   marks[pageNo].push(drawing);
   setDirty(true); redraw();
 }, {passive:false});
