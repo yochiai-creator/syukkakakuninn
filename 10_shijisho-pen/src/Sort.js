@@ -47,6 +47,11 @@ var SORT_OCR_LANGUAGE = 'ja';
 // 過去の月をまとめて取り込みたいときだけ false にする。
 var SORT_SKIP_PAST = true;
 
+// 当月に加えて何か月先まで見るか。
+// 出荷日が先のものは翌月以降のフォルダに入っているため、当月だけ見ると
+// これからチェックする指図書を取りこぼす。
+var SORT_MONTHS_AHEAD = 2;
+
 // 得意先マスタ(コード→会社名)の置き場。'001_【出荷】 の直下に作る。
 var MASTER_PARENT_ID = '1iSYAN13NXaxaLkhVdEywcJkJ0YdVULBu';
 var PROP_MASTER_SHEET = 'CUSTOMER_MASTER_ID';
@@ -57,12 +62,58 @@ var PROP_MASTER_SHEET = 'CUSTOMER_MASTER_ID';
  * @return {Object} 処理結果のまとめ
  */
 function sortShippingOrders() {
+  return sortMonths_(targetMonths_(), SORT_MAX_PER_RUN);
+}
+
+/** 当月から SORT_MONTHS_AHEAD か月先までの [年, 月]。年またぎも扱える。 */
+function targetMonths_() {
   var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
   var now = new Date();
-  return sortShippingOrdersFor(
-    Utilities.formatDate(now, tz, 'yyyy') + '年',
-    Number(Utilities.formatDate(now, tz, 'M')) + '月'
-  );
+  var y = Number(Utilities.formatDate(now, tz, 'yyyy'));
+  var m = Number(Utilities.formatDate(now, tz, 'M'));
+
+  var out = [];
+  for (var i = 0; i <= SORT_MONTHS_AHEAD; i++) {
+    var d = new Date(y, m - 1 + i, 1);
+    out.push([d.getFullYear() + '年', (d.getMonth() + 1) + '月']);
+  }
+  return out;
+}
+
+/**
+ * 複数の月をまとめて処理する。件数と時間は全体で1つぶんとして配る。
+ * フォルダが無い月は黙って飛ばす(先の月はまだ作られていないことがある)。
+ */
+function sortMonths_(months, max) {
+  sortStarted_ = Date.now();
+
+  var all = {
+    対象: [], コピー: [], 済み: 0, 対象外: 0, skip: [], 未登録: [], 残り: 0
+  };
+  var left = max;
+
+  months.forEach(function (ym) {
+    if (left <= 0 || Date.now() - sortStarted_ > SORT_TIME_BUDGET_MS) return;
+
+    var r;
+    try {
+      r = runMonth_(ym[0], ym[1], left);
+    } catch (e) {
+      return;                       // その月のフォルダがまだ無い
+    }
+
+    all.対象.push(ym[0] + '/' + ym[1] + '(' + r.コピー.length + '件)');
+    all.コピー = all.コピー.concat(r.コピー);
+    all.skip   = all.skip.concat(r.skip);
+    all.未登録 = all.未登録.concat(r.未登録);
+    all.済み   += r.済み;
+    all.対象外 += r.対象外;
+    all.残り   += r.残り;
+
+    left -= r.コピー.length + r.skip.length;
+  });
+
+  return finishResult_(all);
 }
 
 /**
@@ -128,11 +179,17 @@ function sortBenchmark() {
  * @param {string} monthName 例 '9月'
  */
 var sortTodayNum_ = 0;   // 20260919 の形。当日以前の判定に使う
+var sortStarted_  = 0;   // 実行の開始時刻。複数の月にまたがっても1つで数える
 
 function sortShippingOrdersFor(yearName, monthName, limit) {
-  var started = Date.now();
-  var max = limit || SORT_MAX_PER_RUN;
+  sortStarted_ = Date.now();
+  var r = runMonth_(yearName, monthName, limit || SORT_MAX_PER_RUN);
+  r.対象 = [yearName + '/' + monthName];
+  return finishResult_(r);
+}
 
+/** 1か月ぶんを処理する。開始時刻は sortStarted_ を共有する。 */
+function runMonth_(yearName, monthName, max) {
   var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
   sortTodayNum_ = Number(Utilities.formatDate(new Date(), tz, 'yyyyMMdd'));
 
@@ -152,10 +209,7 @@ function sortShippingOrdersFor(yearName, monthName, limit) {
   // 問い合わせも1回で済む。
   var doneNames = collectDestNames_(sizeFolders);
 
-  var result = {
-    対象: yearName + '/' + monthName,
-    コピー: [], 済み: 0, 対象外: 0, skip: [], 未登録: [], 残り: 0
-  };
+  var result = { コピー: [], 済み: 0, 対象外: 0, skip: [], 未登録: [], 残り: 0 };
   var files = DriveApp.getFolderById(src).getFilesByType(MimeType.PDF);
   var done = 0;
 
@@ -163,7 +217,7 @@ function sortShippingOrdersFor(yearName, monthName, limit) {
     var file = files.next();
 
     // 打ち切ったあとは数えるだけ。もう一度実行すれば続きから進む
-    if (done >= max || Date.now() - started > SORT_TIME_BUDGET_MS) {
+    if (done >= max || Date.now() - sortStarted_ > SORT_TIME_BUDGET_MS) {
       result.残り++;
       continue;
     }
@@ -181,15 +235,11 @@ function sortShippingOrdersFor(yearName, monthName, limit) {
     }
   }
 
-  result.メモ = result.残り
-    ? '残り ' + result.残り + ' 件。もう一度 sortShippingOrders を実行すれば続きから進みます。'
-    : 'この月は全部終わりました。';
+  return result;
+}
 
-  if (result.対象外) {
-    result.メモ += ' 出荷日が当日以前のため対象外にしたものが ' +
-      result.対象外 + ' 件あります。';
-  }
-
+/** 未登録のまとめとメモ書きを付けて返す。 */
+function finishResult_(result) {
   // 未登録はコードごとにまとめる。同じ得意先が何件も並ぶと見づらく、
   // マスタへ写すときにも邪魔になる。
   var seen = {}, rows = [];
@@ -206,6 +256,14 @@ function sortShippingOrdersFor(yearName, monthName, limit) {
     .filter(function (r) { return r.コード !== '読めず'; })
     .map(function (r) { return r.コード + ',' + r.OCRの名前; });
 
+  result.メモ = result.残り
+    ? '残り ' + result.残り + ' 件。もう一度 sortShippingOrders を実行すれば続きから進みます。'
+    : '対象の月は全部終わりました。';
+
+  if (result.対象外) {
+    result.メモ += ' 出荷日が当日以前のため対象外にしたものが ' +
+      result.対象外 + ' 件あります。';
+  }
   if (rows.length) {
     result.メモ += ' マスタに無い得意先が ' + rows.length +
       ' 件あります。マスタ追記用 の行を得意先マスタに貼り、' +
@@ -216,7 +274,6 @@ function sortShippingOrdersFor(yearName, monthName, limit) {
   return result;
 }
 
-
 /* ---------------- 自動で回す(任意) ---------------- */
 
 /**
@@ -225,13 +282,7 @@ function sortShippingOrdersFor(yearName, monthName, limit) {
  * そのままトリガーに指定してはいけない(件数のつもりでイベントが入る)。
  */
 function sortShippingOrdersBulk() {
-  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
-  var now = new Date();
-  return sortShippingOrdersFor(
-    Utilities.formatDate(now, tz, 'yyyy') + '年',
-    Number(Utilities.formatDate(now, tz, 'M')) + '月',
-    100000  // 実質無制限。打ち切りは時間の方で効かせる
-  );
+  return sortMonths_(targetMonths_(), 100000);  // 打ち切りは時間の方で効かせる
 }
 
 /**
