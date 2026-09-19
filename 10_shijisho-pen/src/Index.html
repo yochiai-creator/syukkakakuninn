@@ -43,42 +43,29 @@
   }
 
   /* ---------- toolbar ---------- */
-  /* 保存は常に見えていること。道具が増えても押せなくならないよう、
-     横に溢れるのは中央の道具だけにして、保存は右端に固定する。 */
+  /* 上は ファイルと保存だけ。書き込みの道具は下の tray に置く。
+     手に持ったまま届く位置に道具があった方が使いやすく、
+     上に詰め込むと横に溢れて隠れてしまうため。 */
   #bar{
-    flex:0 0 auto; display:flex; align-items:center; gap:6px;
+    flex:0 0 auto; display:flex; flex-wrap:wrap; align-items:center; gap:6px;
     padding:8px 10px; padding-top:max(8px, env(safe-area-inset-top));
     background:var(--panel); border-bottom:1px solid var(--line);
-    overflow:hidden; white-space:nowrap;
   }
-  #barScroll{
-    flex:1 1 auto; min-width:0;
-    display:flex; align-items:center; gap:6px;
-    overflow-x:auto; overflow-y:hidden;
-    -webkit-overflow-scrolling:touch;
-    scrollbar-width:none;
-  }
-  #barScroll::-webkit-scrollbar{display:none;}
   #barSave{
-    flex:0 0 auto; display:flex; align-items:center; gap:6px;
-    padding-left:8px; margin-left:2px; border-left:1px solid var(--line);
+    margin-left:auto; display:flex; align-items:center; gap:6px;
   }
-  /* 画面が狭いときは保存を下の段へ回す。
-     右端に固定したままだと、道具の幅がそのぶん削られて
-     ペンや色が窮屈になる。段を分ければ道具は全幅を使え、
-     保存も隠れない。 */
-  @media (max-width:900px){
-    #bar{flex-wrap:wrap; gap:4px;}
-    /* 1段目は ファイル + 道具。100% にすると ファイル が弾かれて
-       3段になるので、残り幅を使う指定にする */
-    #barScroll{order:1; flex:1 1 auto; min-width:0;}
-    #barSave{
-      order:2; width:100%; justify-content:flex-end;
-      border-left:0; margin-left:0; padding-left:0;
-      padding-top:6px; border-top:1px solid var(--line);
-    }
-    #bar > .sep{display:none;}
+
+  /* 下の道具棚。横に溢れたらスクロールではなく折り返す。
+     スクロールだと見えていないボタンに気づけない。 */
+  #tray{
+    flex:0 0 auto;
+    display:flex; flex-wrap:wrap; align-items:center;
+    justify-content:center; gap:6px;
+    padding:8px 10px;
+    padding-bottom:max(8px, env(safe-area-inset-bottom));
+    background:var(--panel); border-top:1px solid var(--line);
   }
+  #tray .sep{display:none;}
   .grp{display:flex; align-items:center; gap:4px; padding:3px;
        border-radius:9px; background:#ece9e3; flex:0 0 auto;}
   button{
@@ -177,11 +164,47 @@
 
 <div id="bar">
   <button id="browse" class="solid">ファイル</button>
-  <div class="sep"></div>
 
-  <div id="barScroll">
+  <div id="barSave">
+    <span id="dirty">未保存</span>
+    <button id="photo" disabled>写真</button>
+    <input id="photoInput" type="file" accept="image/*" multiple hidden>
+    <button id="saveCopy" disabled>別名</button>
+    <button id="saveOver" disabled>上書き</button>
+    <button id="saveDone" class="solid" disabled>チェック完了</button>
+  </div>
+</div>
 
-  <div class="grp" id="tools">
+<div id="stage">
+  <div id="hint">
+    <div>
+      <h1>指図書に直接書き込む</h1>
+      <p>左上の「ファイル」から指図書を選んで、Apple Pencilで書き込みます。保存すると共有ドライブに戻ります。</p>
+      <button id="browse2" class="solid">ファイルを選ぶ</button>
+    </div>
+  </div>
+  <div id="sheet" hidden>
+    <canvas id="pdfLayer"></canvas>
+    <canvas id="inkLayer"></canvas>
+  </div>
+</div>
+
+<div id="scrim"></div>
+<aside id="drawer">
+  <div id="drawerTop">
+    <h2>指図書を開く</h2>
+    <p id="folderName">フォルダを読み込み中…</p>
+    <div id="crumb"></div>
+    <input id="search" type="search" placeholder="依頼No.や出荷先で絞り込む" autocomplete="off">
+  </div>
+  <div id="files"><p class="msg">読み込み中…</p></div>
+  <div id="drawerBot">
+    <button id="goUp" disabled>&lsaquo; ひとつ上へ</button>
+  </div>
+</aside>
+
+<div id="tray">
+<div class="grp" id="tools">
     <button data-tool="pen" class="on">ペン</button>
     <button data-tool="check">レ点</button>
     <button data-tool="erase">消しゴム</button>
@@ -222,46 +245,7 @@
     <button id="zoomLbl" disabled title="タップで全体表示に戻す">100%</button>
     <button id="zoomIn" disabled>&plus;</button>
   </div>
-
-  </div><!-- /barScroll -->
-
-  <div id="barSave">
-    <span id="dirty">未保存</span>
-    <button id="photo" disabled>写真</button>
-    <input id="photoInput" type="file" accept="image/*" multiple hidden>
-    <button id="saveCopy" disabled>別名</button>
-    <button id="saveOver" disabled>上書き</button>
-    <button id="saveDone" class="solid" disabled>チェック完了</button>
-  </div>
 </div>
-
-<div id="stage">
-  <div id="hint">
-    <div>
-      <h1>指図書に直接書き込む</h1>
-      <p>左上の「ファイル」から指図書を選んで、Apple Pencilで書き込みます。保存すると共有ドライブに戻ります。</p>
-      <button id="browse2" class="solid">ファイルを選ぶ</button>
-    </div>
-  </div>
-  <div id="sheet" hidden>
-    <canvas id="pdfLayer"></canvas>
-    <canvas id="inkLayer"></canvas>
-  </div>
-</div>
-
-<div id="scrim"></div>
-<aside id="drawer">
-  <div id="drawerTop">
-    <h2>指図書を開く</h2>
-    <p id="folderName">フォルダを読み込み中…</p>
-    <div id="crumb"></div>
-    <input id="search" type="search" placeholder="依頼No.や出荷先で絞り込む" autocomplete="off">
-  </div>
-  <div id="files"><p class="msg">読み込み中…</p></div>
-  <div id="drawerBot">
-    <button id="goUp" disabled>&lsaquo; ひとつ上へ</button>
-  </div>
-</aside>
 
 <div id="ask" hidden>
   <div class="askBox">
