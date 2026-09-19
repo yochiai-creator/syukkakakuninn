@@ -3,10 +3,17 @@
 <head>
 <base target="_top">
 <meta charset="utf-8">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Reggae+One&display=swap">
 <style>
+  /* ハンコ用の江戸文字。Reggae One から 前田森落合 の5文字だけを
+     抜き出して埋め込んである(約1.3KB)。外部に取りに行かないので、
+     社内から Google Fonts が塞がれていても字が変わらない。 */
+  @font-face{
+    font-family:'StampEdo';
+    font-style:normal;
+    font-weight:400;
+    src:url(data:font/woff2;base64,d09GMgABAAAAAAU0ABAAAAAACVQAAATeAAEZmgAAAAAAAAAAAAAAAAAAAAAAAAAAGYFSGyAcKgZgAFQRCAqHEIVsATYCJAMOCw4ABCAFg2wHIBckGA4biQcIjsJxL1qbTKb4xGPFw8ca7f3dPTMpQaydJ9UQr1pJYglaxStDZsjsz+NpL00KTsp2meiftptT+WDZvr9U7+Gl48dUkpBGqLRNqfTuJ50qpXNpYAlIxiPSKZQJ0AEGDzQWUo1ttuaYfooml5msIdGrz7uPEkAxhVYEzkxRBYKgg56dTJBy0klthJRTxqKHoAvGwkDQJdPFAik4AAmCDz9BJuEApAgi9pwNgOUHRJoCWD4CCK6IM6VGsWx2+WfCMTpZzZZM/2GKuyoFG1ABsx6DpUg+sKxHPAQg/w/EPEFCsFKS5F3uYXI/S09iE7BB8pDIASzjF8Y2xIUUgGIALB3mNsvrIWelckgmbvt/B5DdBQUgAMkELgLQjQMkQArUQwqjXxBygHI8LMRKJeLp3nWNGZL5P8c09mnb6p/TnUdd6X0CQscBG0mVUqoQqBxdpf8XxEc1ZVCAAsfBvAzvnDxCQLgIMUdEOARswuHsSgQP9Ke5DpxeErVWpdZoOFqVubvKVUsjBpkwBpo32klBo5BUyhsViOmOBFJEt7vKEMZIhYiB9mYGIfmpcJXRUqJPoQG108jELJW3mXk3piVkPM2ALmSNwmYLzEoRErQKSWXznpdr+DXaAyHaLDWRgl5CZO1hECoQrZQiGtAWrblypzsl8EOkwAdhtI+QyknonFl3QWOJq0xa4bpOK2lEozR5NzdoyxAtM0ldiYRk02Qu8jvPKbs9p16wO2/rlDKtxZI+S6G//D9JbDEnT7YCVH18ie2tXfo2vjFt2rzOc5OoGQd8JVksaNtIk/QNHLVK9EMavqqPU3Uoa8JaEhTeSK50Ez4baNevuMf68qcvljpNS7fHS1ewa2PtJEmBrtb2hilNh51IG/562rRBuZeag6Di2nmW0QEqHznaoa6SUS1Rs7uUT2mLZd+ZuWRq9hNFGFY7wnvWUHusagGb6S6R9PYMHdaurvUb70hCfP+0V2LFAINz2aS8Z+LqWcfjP+i7udj3MUlGj7D/LfCfkqURW7xx84gQ9gEjmTtbRFQ59yzZJZ546zHRP7GLNyu/lz+/nyeWM8QF/uRgOkEJ34Zdzl4AOfcN2OOqk4fGRFHE+fVk0bYlDsIHW0iX7SKx8JRLhdtWEXHpiDO8WLnOlvqYH2irOcSd8Nmhz4KM665E6QKJ/JKL2P1Th0Ph3n3t46Y13Bs3r3pS71l3t/h2L/HJ6Ddmf/ntqOyZvh74jtfdp5KZgc/KmbTLkdZiXfjoi5nqocOKTlcPiP4cMWvzgftXU8uPbt0SQWj2RABAANEyy3r70bE2u4yvPCH+AvArb3QGAL8vr3wC0/kdfgq3ASjEAgiQ3f1/QPoHpvmkpyB0iAAOBQlKKhTG+oXy8ebsBnpUpBEOy/gAvgLLh3F2w8ci8caHS/HLRwiIOB+bZ0jf4/ALG+SzsumpEz0tnS4ocWI2piCH1KgDaFWKMVEzxFYGK6XcOFdXhM7jTjrbqZB53IVt5TTRSmrpg892pRBFycosmoaVRRfdJ8AouUhvr7Po9KDZDhWBYpjUJvXsVOcKNZIa3eiQSpT0q1moPe7KJO1OYkVpxLDRdEVkytVLH4/wjsgyP2EXJSnpk2Rn+ldtUJnL5pRwXcB8DsSZjmrA/v0T4S9aCwC745O1WZBMmlIy) format('woff2');
+  }
+
   :root{
     --ink:#16181d;
     --paper:#e8e6e0;
@@ -283,11 +290,11 @@ var zoom=1, fitScale=1;
 var MIN_ZOOM=1, MAX_ZOOM=6;
 var tool="pen", color="#d32f2f", size=2.2;
 var STAMP_COLOR="#d8352a";   // 朱色
-var STAMP_FONT="'Reggae One','Hiragino Mincho ProN','Yu Mincho',serif";  // 江戸文字
+var STAMP_FONT="'StampEdo','Hiragino Mincho ProN','Yu Mincho',serif";  // 江戸文字
 
-/* フォントが届く前に描くと代替の字になるので、読めたら描き直す */
+/* 埋め込みフォントも読み込みは非同期。読めたら描き直す */
 if(document.fonts && document.fonts.load){
-  document.fonts.load("40px 'Reggae One'", "前田森落合").then(function(){
+  document.fonts.load("40px 'StampEdo'", "前田森落合").then(function(){
     if(pdfDoc) redraw();
   }).catch(function(){});
 }
