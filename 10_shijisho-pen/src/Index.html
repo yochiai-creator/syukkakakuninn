@@ -520,6 +520,11 @@ $("#zoomLbl").onclick = function(){ applyZoom(1); };
    変形中は少しぼやけるが、離した時点で綺麗に描き直される。 */
 var touches={}, pinch=null;
 
+/* 1本目の指が触れた時点の状態。2本目が来てピンチと分かったら
+   ここまで巻き戻す。ペン未使用のときは指でも描けるため、
+   つまもうとしただけで1本目が線を引いてしまう。 */
+var fingerStart=null;
+
 function tdist(a,b){ var dx=a.x-b.x, dy=a.y-b.y; return Math.sqrt(dx*dx+dy*dy); }
 function touchIds(){ return Object.keys(touches).slice(0,2); }
 
@@ -528,6 +533,9 @@ stage.addEventListener("pointerdown", function(e){
   touches[e.pointerId]={x:e.clientX, y:e.clientY};
 
   var ids=touchIds();
+  if(ids.length===1){
+    fingerStart={ page:pageNo, len:(marks[pageNo]||[]).length, dirty:dirty };
+  }
   if(ids.length===2 && !pinch){
     var a=touches[ids[0]], b=touches[ids[1]];
     var mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
@@ -547,14 +555,17 @@ stage.addEventListener("pointerdown", function(e){
     sheet.style.transformOrigin="0 0";
     sheet.style.willChange="transform";
 
-    // 2本目が触れた時点で、1本目が引きかけた線は取り消す
-    // (拡大しようとしただけなので紙に跡を残さない)
-    if(drawing && drawing.type==="stroke"){
-      var list=marks[pageNo]||[];
-      var at=list.indexOf(drawing);
-      if(at>=0){ list.splice(at,1); redraw(); }
-    }
+    // つまもうとしただけなので、1本目の指が触れて以降の書き込みを
+    // すべて取り消す。直前の1本だけ消すと、1本目が引いた線が残る。
     drawing=null;
+    if(fingerStart){
+      var list=marks[fingerStart.page];
+      if(list && list.length > fingerStart.len){
+        list.length = fingerStart.len;
+        setDirty(fingerStart.dirty);
+        if(fingerStart.page===pageNo) redraw();
+      }
+    }
   }
 }, {passive:false});
 
@@ -617,6 +628,7 @@ function endTouch(e){
   if(e.pointerType!=="touch") return;
   delete touches[e.pointerId];
   if(pinch && Object.keys(touches).length<2) commitPinch();
+  if(!Object.keys(touches).length) fingerStart=null;
 }
 stage.addEventListener("pointerup", endTouch);
 stage.addEventListener("pointercancel", endTouch);
