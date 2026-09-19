@@ -471,7 +471,11 @@ var CUSTOMER_ROWS = [
 
   // 同じ系列の他拠点と同じ形に揃えた。原本での確認は未了
   ['5908', '(株)ホームエネルギー近畿 姫路センター'],
-  ['5200', '(株)ホームエネルギー近畿 京都北センター']
+  ['5200', '(株)ホームエネルギー近畿 京都北センター'],
+
+  // 原本で確認した
+  ['6906', '(株)エルピーガス下関'],
+  ['3597', 'ガスコミュニティ静岡 (大井川LPGセンター)']
 ];
 
 /** 上の CUSTOMER_ROWS をマスタに登録する。エディタから実行できる。 */
@@ -626,7 +630,9 @@ function parseCsv_(text) {
  * 直後が英数字でなければ区切りとみなす。
  */
 function extractCustomerCode_(text) {
-  var m = text.match(/出荷先[:：]\s*([0-9A-Za-z]{3,5})(?![0-9A-Za-z])/);
+  // コロンが無い書式がある(出荷先 0820 ひかり工機株式会社)。
+  // 付いていない場合も拾えるようにする。
+  var m = text.match(/出荷先[:：]?\s*([0-9A-Za-z]{3,5})(?![0-9A-Za-z])/);
   return (m && /\d/.test(m[1])) ? m[1].toUpperCase() : '';
 }
 
@@ -691,20 +697,45 @@ var LITER_TO_KG = { 19: 8, 24: 10, 47: 20, 71: 30, 118: 50 };
  * 読み落とすことがあるが、118L の方は残っていることが多い。
  */
 function extractSizeKg_(text) {
-  var kg = uniqueNumber_(text, /(\d{1,3})\s*kg/gi);
+  var kgCounts = countNumbers_(text, /(\d{1,3})\s*kg/gi);
+
+  var kg = onlyOne_(kgCounts);
   if (kg) return kg;
 
-  var liter = uniqueNumber_(text, /(\d{1,3})\s*L[\s(（]/gi);
-  return (liter && LITER_TO_KG[liter]) ? LITER_TO_KG[liter] : 0;
+  // kg を読めない、または複数に割れた場合は容量から引く
+  var liter = onlyOne_(countNumbers_(text, /(\d{1,3})\s*L[\s(（]/gi));
+  if (liter && LITER_TO_KG[liter]) return LITER_TO_KG[liter];
+
+  // それでも決まらないときだけ、kg のうち一番多く出た値を使う。
+  // 同数なら決めない。振り分け先のフォルダが無ければ呼び出し側で弾かれる。
+  return dominant_(kgCounts);
 }
 
-/** 正規表現で拾えた数がただ1種類ならそれを返す。複数あれば0。 */
-function uniqueNumber_(text, re) {
-  var found = {}, m;
-  while ((m = re.exec(text)) !== null) found[Number(m[1])] = true;
+/** 正規表現で拾えた数の出現回数を数える。 */
+function countNumbers_(text, re) {
+  var counts = {}, m;
+  while ((m = re.exec(text)) !== null) {
+    var n = Number(m[1]);
+    counts[n] = (counts[n] || 0) + 1;
+  }
+  return counts;
+}
 
-  var keys = Object.keys(found);
+/** 1種類しか無ければその値。複数あれば0。 */
+function onlyOne_(counts) {
+  var keys = Object.keys(counts);
   return keys.length === 1 ? Number(keys[0]) : 0;
+}
+
+/** 一番多く出た値。同数で並んだ場合は決めない。 */
+function dominant_(counts) {
+  var best = 0, bestN = 0, tie = false;
+  Object.keys(counts).forEach(function (k) {
+    var n = counts[k];
+    if (n > bestN) { best = Number(k); bestN = n; tie = false; }
+    else if (n === bestN) { tie = true; }
+  });
+  return tie ? 0 : best;
 }
 
 /**
@@ -713,7 +744,7 @@ function uniqueNumber_(text, re) {
  *   出荷先: G737 (株)りゅうせき 中部物流センター → (株)りゅうせき 中部物流センター
  */
 function extractDestination_(text) {
-  var m = text.match(/出荷先[:：]\s*([^\r\n]+)/);
+  var m = text.match(/出荷先[:：]?\s*([^\r\n]+)/);
   if (!m) return '';
 
   var line = m[1].replace(/\s+/g, ' ').trim();
