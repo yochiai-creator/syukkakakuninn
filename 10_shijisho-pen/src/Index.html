@@ -127,6 +127,13 @@
   .row span{font-size:12px; color:#6b6e75;}
   #drawerBot{padding:12px 16px; border-top:1px solid var(--line);
              padding-bottom:max(12px, env(safe-area-inset-bottom));}
+  #folderEdit{display:grid; gap:8px;}
+  #folderEdit input{
+    font:inherit; font-size:15px; padding:10px 12px;
+    border:1px solid var(--line); border-radius:8px; width:100%;
+    box-sizing:border-box; background:#fff;
+  }
+  #folderEdit .row2{display:flex; gap:8px; justify-content:flex-end;}
   .msg{padding:18px 16px; color:#6b6e75; font-size:14px; line-height:1.7;}
 
   #toast{
@@ -217,6 +224,14 @@
   <div id="files"><p class="msg">読み込み中…</p></div>
   <div id="drawerBot">
     <button id="setFolder">フォルダを変更</button>
+    <div id="folderEdit" hidden>
+      <input id="folderInput" type="text" inputmode="url" autocomplete="off"
+             placeholder="フォルダのURLまたはIDを貼り付け">
+      <div class="row2">
+        <button id="folderCancel">やめる</button>
+        <button id="folderApply" class="solid">変更する</button>
+      </div>
+    </div>
   </div>
 </aside>
 
@@ -393,19 +408,47 @@ function refreshFolder(){
     .getFolderInfo();
 }
 
+/* フォルダ変更。prompt() は Apps Script の埋め込み枠では効かないので、
+   画面内の入力欄で受ける。タブレットでも貼り付けやすい。 */
 $("#setFolder").onclick = function(){
-  var v = prompt("フォルダIDまたはフォルダのURLを貼り付けてください");
-  if(!v) return;
+  $("#setFolder").hidden = true;
+  $("#folderEdit").hidden = false;
+  $("#folderInput").value = "";
+  $("#folderInput").focus();
+};
+
+$("#folderCancel").onclick = function(){
+  $("#folderEdit").hidden = true;
+  $("#setFolder").hidden = false;
+};
+
+$("#folderApply").onclick = function(){
+  var v = $("#folderInput").value.trim();
+  if(!v){ toast("URLかIDを入れてください"); return; }
+
+  var btn=$("#folderApply"), old=btn.textContent;
+  btn.disabled=true; btn.textContent="変更中…";
+
   google.script.run
     .withSuccessHandler(function(info){
       $("#folderName").textContent=info.name;
-      toast("フォルダを変更しました");
+      $("#folderEdit").hidden = true;
+      $("#setFolder").hidden = false;
+      btn.disabled=false; btn.textContent=old;
+      toast("フォルダを変更しました: "+info.name);
       $("#search").value="";
       openFolder("");
     })
-    .withFailureHandler(function(err){ toast("変更できません: "+err.message); })
+    .withFailureHandler(function(err){
+      btn.disabled=false; btn.textContent=old;
+      toast("変更できません: "+err.message);
+    })
     .setFolderId(v);
 };
+
+$("#folderInput").addEventListener("keydown", function(e){
+  if(e.key==="Enter") $("#folderApply").click();
+});
 
 refreshFolder();
 openFolder("");
