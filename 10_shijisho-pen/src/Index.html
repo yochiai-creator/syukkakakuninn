@@ -537,7 +537,8 @@ stage.addEventListener("pointerdown", function(e){
     pinch={
       d:  tdist(a,b)||1,
       z:  zoom,
-      mx: mx, my: my,
+      mx: mx, my: my,          // つまみ始めの中点
+      cx: mx, cy: my,          // 今の中点(確定時の基準)
       px: (stage.scrollLeft + mx - r.left) - sheet.offsetLeft,
       py: (stage.scrollTop  + my - r.top ) - sheet.offsetTop,
       k:  1
@@ -579,6 +580,8 @@ stage.addEventListener("pointermove", function(e){
   var tx = (mx - pinch.mx) + (1-k)*pinch.px;
   var ty = (my - pinch.my) + (1-k)*pinch.py;
 
+  pinch.cx = mx; pinch.cy = my;
+
   sheet.style.transform = "translate("+tx+"px,"+ty+"px) scale("+k+")";
   $("#zoomLbl").textContent = Math.round(pinch.z*k*100)+"%";
 }, {passive:false});
@@ -588,20 +591,21 @@ function commitPinch(){
   var p=pinch; pinch=null;
   if(!p) return;
 
-  var last = touches[touchIds()[0]];
-  var mx = last ? last.x : p.mx, my = last ? last.y : p.my;
+  // 基準は最後の「2本の中点」。ここで残った指の位置を使うと、
+  // 中点との差ぶん(数十px)だけ画面が飛ぶ。
+  var mx = p.cx, my = p.cy;
 
   sheet.style.transform="";
   sheet.style.willChange="";
 
   var next = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, p.z*p.k));
-  if(Math.abs(next-zoom) < 0.005){ updateZoomLbl(); return; }
+  if(Math.abs(next-p.z) < 0.005){ updateZoomLbl(); return; }
 
-  var ratio = next/zoom;
+  var ratio = next/p.z;
   zoom = next;
 
   renderPage().then(function(){
-    // 描き直したあとの紙の位置は変わるので、取り直して合わせる
+    // 描き直すと紙の位置(margin:auto ぶん)が変わるので取り直して合わせる
     var r=stage.getBoundingClientRect();
     stage.scrollLeft = sheet.offsetLeft + p.px*ratio - (mx - r.left);
     stage.scrollTop  = sheet.offsetTop  + p.py*ratio - (my - r.top);
