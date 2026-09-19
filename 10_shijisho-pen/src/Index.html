@@ -99,6 +99,7 @@
   .sep{width:1px; height:26px; background:var(--line); flex:0 0 auto;}
   #pageLbl{font-variant-numeric:tabular-nums; padding:0 6px; font-size:14px;}
   #zoomLbl{font-variant-numeric:tabular-nums; min-width:58px;}
+  #photo.has{background:#e8f1ec; color:#0b6b5d; font-weight:600;}
   #stamps button{color:var(--stamp); font-weight:600; padding:8px 10px;}
   #stamps button.on{background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.14);}
   #dirty{color:#b25000; font-size:13px; padding:0 2px; display:none;}
@@ -226,6 +227,8 @@
 
   <div id="barSave">
     <span id="dirty">未保存</span>
+    <button id="photo" disabled>写真</button>
+    <input id="photoInput" type="file" accept="image/*" multiple hidden>
     <button id="saveCopy" disabled>別名</button>
     <button id="saveOver" disabled>上書き</button>
     <button id="saveDone" class="solid" disabled>チェック完了</button>
@@ -265,6 +268,7 @@
     <p id="askMsg"></p>
     <div class="askRow">
       <button id="askNo">やめる</button>
+      <button id="askExtra" hidden></button>
       <button id="askYes" class="solid">はい</button>
     </div>
   </div>
@@ -311,18 +315,31 @@ function toast(msg){
 /* ---------- 確認ダイアログ ---------- */
 /* confirm() は使えない。別オリジンの埋め込み枠で動くため、
    ブラウザがブロックして即 false を返す(押しても何も起きない)。 */
-var askFn=null;
-function ask(msg, onYes){
+var askFn=null, askExtraFn=null;
+
+/* opts: {yes:"はい", extra:{label, fn}} */
+function ask(msg, onYes, opts){
+  opts = opts || {};
   $("#askMsg").textContent = msg;
+  $("#askYes").textContent = opts.yes || "はい";
+
+  var ex = $("#askExtra");
+  if(opts.extra){
+    ex.textContent = opts.extra.label;
+    ex.hidden = false;
+    askExtraFn = opts.extra.fn;
+  } else {
+    ex.hidden = true;
+    askExtraFn = null;
+  }
+
   $("#ask").hidden = false;
   askFn = onYes;
 }
-$("#askYes").onclick = function(){
-  $("#ask").hidden = true;
-  var f=askFn; askFn=null;
-  if(f) f();
-};
-$("#askNo").onclick = function(){ $("#ask").hidden = true; askFn=null; };
+function closeAsk(){ $("#ask").hidden = true; askFn=null; askExtraFn=null; }
+$("#askYes").onclick   = function(){ var f=askFn;      closeAsk(); if(f) f(); };
+$("#askExtra").onclick = function(){ var f=askExtraFn; closeAsk(); if(f) f(); };
+$("#askNo").onclick    = function(){ closeAsk(); };
 
 function group(sel, attr, fn){
   document.querySelectorAll(sel+" button").forEach(function(b){
@@ -368,9 +385,16 @@ $("#saveOver").onclick = function(){ save("overwrite"); };
 $("#saveCopy").onclick = function(){ save("copy"); };
 $("#saveDone").onclick = function(){
   if(!curFile) return;
-  ask("チェック完了として ◆チェック完了 に保存します。\n\n保存後、元の "
+  var photoLine = photos.length
+    ? "現品の写真 " + photos.length + " 枚を末尾に追加します。\n\n"
+    : "現品の写真はまだありません。\n\n";
+
+  ask(photoLine + "チェック完了として ◆チェック完了 に保存します。\n\n保存後、元の "
     + curFile.name + " はゴミ箱へ移動します。\n(30日間は Drive のゴミ箱から戻せます)",
-    function(){ save("done"); });
+    function(){ save("done"); },
+    photos.length ? null : { yes:"写真なしで保存", extra:{ label:"写真を撮る", fn:function(){
+        $("#photoInput").click();
+    }}});
 };
 
 function setDirty(v){
@@ -526,11 +550,12 @@ function mountPdf(res){
   curFile={id:res.id, name:res.name};
   srcBytes=b64ToBytes(res.data);
   marks={}; pageNo=1; setDirty(false); penSeen=false; zoom=1;
+  clearPhotos();
 
   pdfjsLib.getDocument({data: srcBytes.slice()}).promise.then(function(doc){
     pdfDoc=doc; pageCount=doc.numPages;
     hint.hidden=true; sheet.hidden=false;
-    ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl"].forEach(function(id){
+    ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl","photo"].forEach(function(id){
       $("#"+id).disabled=false;
     });
     return renderPage();
@@ -916,6 +941,96 @@ inkCv.addEventListener("pointerup", endStroke);
 inkCv.addEventListener("pointercancel", endStroke);
 inkCv.addEventListener("pointerleave", endStroke);
 
+/* ---------- 現品写真 ---------- */
+/* チェック完了のときだけ、撮った写真をPDFの末尾に足す。
+   上書き保存や別名保存には入れない(元の枚数を勝手に増やさないため)。 */
+var photos=[];
+
+function updatePhotoBtn(){
+  var b=$("#photo");
+  b.textContent = photos.length ? "写真 "+photos.length : "写真";
+  b.classList.toggle("has", photos.length>0);
+}
+
+function clearPhotos(){ photos=[]; updatePhotoBtn(); }
+
+$("#photo").onclick = function(){
+  if(!photos.length){ $("#photoInput").click(); return; }
+  ask("現品の写真が "+photos.length+" 枚あります。",
+      function(){ $("#photoInput").click(); },
+      { yes:"追加する", extra:{ label:"全部消す", fn:function(){
+          clearPhotos(); toast("写真を消しました");
+      }}});
+};
+
+$("#photoInput").addEventListener("change", function(e){
+  var files=Array.prototype.slice.call(e.target.files||[]);
+  e.target.value="";                     // 同じ写真をもう一度選べるように
+  if(!files.length) return;
+
+  toast("写真を取り込み中…");
+  var chain=Promise.resolve();
+  files.forEach(function(f){
+    chain = chain.then(function(){ return photoToJpeg(f); })
+                 .then(function(bytes){ photos.push(bytes); });
+  });
+  chain.then(function(){
+    updatePhotoBtn();
+    toast("写真 "+photos.length+" 枚");
+  }).catch(function(err){
+    console.error(err);
+    toast("写真を読み込めませんでした");
+  });
+});
+
+/* どの形式で来ても一度キャンバスに通してJPEGに揃える。
+   iPhone の HEIC でも、表示できる形式なら取り込める。
+   長辺1600pxに縮めて、PDFが重くなりすぎないようにする。 */
+function photoToJpeg(file){
+  return new Promise(function(resolve, reject){
+    var url=URL.createObjectURL(file);
+    var img=new Image();
+
+    img.onload=function(){
+      var MAX=1600;
+      var sc=Math.min(1, MAX/Math.max(img.width, img.height));
+      var c=document.createElement("canvas");
+      c.width =Math.max(1, Math.round(img.width *sc));
+      c.height=Math.max(1, Math.round(img.height*sc));
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+
+      c.toBlob(function(blob){
+        if(!blob){ reject(new Error("変換できません")); return; }
+        blob.arrayBuffer().then(function(ab){ resolve(new Uint8Array(ab)); }, reject);
+      }, "image/jpeg", 0.82);
+    };
+
+    img.onerror=function(){ URL.revokeObjectURL(url); reject(new Error("読み込めません")); };
+    img.src=url;
+  });
+}
+
+/* 写真を1枚1ページとして末尾に足す。用紙は本体の1ページ目に合わせる */
+function appendPhotos(out){
+  if(!photos.length) return Promise.resolve();
+
+  var first=out.getPages()[0];
+  var pw=first?first.getWidth():595.28, ph=first?first.getHeight():841.89;
+  var chain=Promise.resolve();
+
+  photos.forEach(function(bytes){
+    chain=chain.then(function(){ return out.embedJpg(bytes); }).then(function(img){
+      var page=out.addPage([pw, ph]);
+      var m=Math.min(pw, ph)*0.05;
+      var sc=Math.min((pw-m*2)/img.width, (ph-m*2)/img.height);
+      var w=img.width*sc, h=img.height*sc;
+      page.drawImage(img, {x:(pw-w)/2, y:(ph-h)/2, width:w, height:h});
+    });
+  });
+  return chain;
+}
+
 /* ---------- save ---------- */
 function bytesToB64(bytes){
   var out="", chunk=0x8000;
@@ -933,7 +1048,7 @@ function save(mode){
   btns.forEach(function(b){ b.disabled=true; });
   label.textContent="保存中…";
 
-  buildPdf().then(function(bytes){
+  buildPdf(mode==="done").then(function(bytes){
     return new Promise(function(resolve, reject){
       google.script.run
         .withSuccessHandler(resolve)
@@ -944,6 +1059,7 @@ function save(mode){
     setDirty(false);
     if(res.mode==="done"){
       toast("チェック完了 " + res.folder + " へ保存、元ファイルはゴミ箱へ");
+      clearPhotos();
       closeFile();
     } else {
       toast(res.mode==="overwrite" ? "上書き保存しました" : res.name+" を作成しました");
@@ -963,12 +1079,12 @@ function closeFile(){
   curFile=null; pdfDoc=null; srcBytes=null;
   marks={}; pageNo=1; pageCount=0; zoom=1; setDirty(false);
   sheet.hidden=true; hint.hidden=false;
-  ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl"].forEach(function(id){
+  ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl","photo"].forEach(function(id){
     $("#"+id).disabled=true;
   });
 }
 
-function buildPdf(){
+function buildPdf(withPhotos){
   var PDFDocument = PDFLib.PDFDocument;
   // ハンコの字がフォント未読込のまま焼き込まれないように待つ
   var fontReady = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
@@ -999,7 +1115,9 @@ function buildPdf(){
       });
     });
 
-    return chain.then(function(){ return out.save(); });
+    return chain
+      .then(function(){ return withPhotos ? appendPhotos(out) : null; })
+      .then(function(){ return out.save(); });
   });
 }
 
