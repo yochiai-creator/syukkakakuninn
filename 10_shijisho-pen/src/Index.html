@@ -19,6 +19,17 @@
     font-family:-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif;
     font-size:15px; overflow:hidden; touch-action:none;
     display:flex; flex-direction:column;
+
+    /* 紙の上で書くと「調べる/翻訳/検索」の選択メニューが出るのを止める。
+       長押しの呼び出しと文字選択、タップ時の灰色の反応を切る。 */
+    -webkit-touch-callout:none;
+    -webkit-user-select:none; user-select:none;
+    -webkit-tap-highlight-color:transparent;
+  }
+  /* 検索欄だけは文字を選べないと困るので戻す */
+  input, textarea{
+    -webkit-touch-callout:default;
+    -webkit-user-select:text; user-select:text;
   }
 
   /* ---------- toolbar ---------- */
