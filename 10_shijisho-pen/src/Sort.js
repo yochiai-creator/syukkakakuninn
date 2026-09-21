@@ -416,7 +416,7 @@ function setupCustomerMaster() {
 var CUSTOMER_ROWS = [
   // 指図書の原本で確認済み
   ['8537', '㈱小国資源開発'],
-  ['0820', 'ひかり工機'],
+  ['0820', 'ひかり工機株式会社'],
   ['3580', '(株)サイサン 磐田工場'],
   ['C942', '福岡LPGセンター(株)福岡西事業所'],
   ['J177', '中部プロパン株式会社供給管理センター'],
@@ -918,6 +918,53 @@ function scanCopies_() {
   });
 
   return { 一致した件数: ok, 一致しない: bad, マスタ件数: Object.keys(master).length };
+}
+
+/**
+ * 1件の指図書について、GAS 側の OCR が出荷先の行をどう読んだかを出す。
+ * ファイル名は正しく付いているのに得意先コードで引けない、という形の
+ * 不具合を、推測ではなく実際の読みで確かめるためのもの。
+ *
+ * DEBUG_ORDER_NO に依頼No の一部(例 '50376')を入れて実行する。
+ */
+var DEBUG_ORDER_NO = '50376';
+
+function sortDebugOne() {
+  var it = DriveApp.searchFiles(
+    "title contains '" + q_(DEBUG_ORDER_NO) + "' and mimeType = 'application/pdf' and trashed = false"
+  );
+  if (!it.hasNext()) throw new Error(DEBUG_ORDER_NO + ' を含む PDF が見つかりません');
+
+  var file = it.next();
+  var text = readPdfText_(file);
+
+  var m = text.match(/出荷先[:：]?\s*([^\r\n]+)/);
+  var line = m ? m[1] : '';
+
+  var code   = extractCustomerCode_(text);
+  var norm   = normCode_(code);
+  var master = loadCustomerMaster_();
+
+  return {
+    ファイル: file.getName(),
+    出荷先の行: line,
+    文字コード: codePoints_(line.slice(0, 24)),
+    出荷先の出現回数: (text.match(/出荷先/g) || []).length,
+    読めたコード: code || '(空)',
+    正規化したコード: norm || '(空)',
+    マスタにある: !!master[norm],
+    マスタの名前: master[norm] || '(無し)',
+    コードを落とした名前: extractDestination_(text)
+  };
+}
+
+/** 先頭の文字を U+XXXX で並べる。全角と半角の取り違えを見分けるため。 */
+function codePoints_(s) {
+  var out = [];
+  for (var i = 0; i < s.length; i++) {
+    out.push(s.charAt(i) + ':' + s.charCodeAt(i).toString(16).toUpperCase());
+  }
+  return out.join(' ');
 }
 
 /**
