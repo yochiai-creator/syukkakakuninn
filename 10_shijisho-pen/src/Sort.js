@@ -353,7 +353,13 @@ function sortOne_(file, sizeFolders, doneNames, result) {
 
   if (!to) {
     to = extractDestination_(text);                 // マスタに無ければOCRの読み
-    result.未登録.push({ コード: code || '読めず', OCRの名前: to, 元: srcName });
+    var raw = text.match(/出荷先[^\r\n]{0,40}/);
+    result.未登録.push({
+      コード: code || '読めず',
+      OCRの名前: to,
+      出荷先の行: raw ? raw[0] : '(出荷先が見つからない)',
+      元: srcName
+    });
   }
 
   var newName = prefix + (to || '出荷先不明') + '.pdf';
@@ -644,7 +650,9 @@ function parseCsv_(text) {
 function extractCustomerCode_(text) {
   // コロンが無い書式がある(出荷先 0820 ひかり工機株式会社)。
   // 付いていない場合も拾えるようにする。
-  var m = toHalfAlnum_(text).match(/出荷先[:：]?\s*([0-9A-Za-z]{3,5})(?![0-9A-Za-z])/);
+  // 出荷先とコードの間に OCR が拾った記号(: や ・)が挟まる回がある。
+  // 記号か空白なら数文字まで読み飛ばす。
+  var m = toHalfAlnum_(text).match(/出荷先[^0-9A-Za-z\r\n]{0,4}([0-9A-Za-z]{3,5})(?![0-9A-Za-z])/);
   return (m && /\d/.test(m[1])) ? m[1].toUpperCase() : '';
 }
 
@@ -791,7 +799,7 @@ function extractDestination_(text) {
 function stripCustomerCode_(line) {
   // 全角で読まれた回にも効くよう、判定用に半角へ寄せる。
   // 落とす長さは元の行と同じなので、切る位置はそのまま使える。
-  var m = toHalfAlnum_(line).match(/^([0-9A-Za-z]{3,5})(?![0-9A-Za-z])[\s　]*/);
+  var m = toHalfAlnum_(line).match(/^[^0-9A-Za-z\r\n]{0,3}([0-9A-Za-z]{3,5})(?![0-9A-Za-z])[\s　]*/);
   return (m && /\d/.test(m[1])) ? line.slice(m[0].length) : line;
 }
 
