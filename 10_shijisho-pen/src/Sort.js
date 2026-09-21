@@ -945,7 +945,7 @@ function sortDebugOne() {
   var norm   = normCode_(code);
   var master = loadCustomerMaster_();
 
-  return {
+  var out = {
     ファイル: file.getName(),
     出荷先の行: line,
     文字コード: codePoints_(line.slice(0, 24)),
@@ -956,6 +956,9 @@ function sortDebugOne() {
     マスタの名前: master[norm] || '(無し)',
     コードを落とした名前: extractDestination_(text)
   };
+
+  Logger.log(JSON.stringify(out, null, 2));
+  return out;
 }
 
 /** 先頭の文字を U+XXXX で並べる。全角と半角の取り違えを見分けるため。 */
