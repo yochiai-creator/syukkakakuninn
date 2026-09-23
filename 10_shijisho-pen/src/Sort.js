@@ -919,19 +919,28 @@ function trashGarbledCopies() {
 
   var out = { 消した件数: found.一致しない.length, 残した件数: found.一致した件数,
               一覧: found.一致しない.map(function (r) { return r.場所; }) };
+
+  // 出荷日が過ぎていて作り直せないものは消していない。
+  // 名前が崩れていたら手で直すか、マスタに登録して次回から正しくする。
+  if (found.作り直せないので残した.length) {
+    out.作り直せないので残した = found.作り直せないので残した;
+  }
   Logger.log(JSON.stringify(out, null, 2));
   return out;
 }
 
 /** 振り分け先を見て、マスタの名前と一致するか調べる。 */
 function scanCopies_() {
+  var tz    = Session.getScriptTimeZone() || 'Asia/Tokyo';
+  var today = Number(Utilities.formatDate(new Date(), tz, 'yyyyMMdd'));
+
   var index  = buildSizeIndex_(SORT_DEST_ROOT_ID);
   var master = loadCustomerMaster_();
 
   var known = {};
   Object.keys(master).forEach(function (k) { known[master[k]] = true; });
 
-  var bad = [], ok = 0;
+  var bad = [], ok = 0, 作り直せない = [];
 
   Object.keys(index).forEach(function (kg) {
     var it = DriveApp.getFolderById(index[kg].id).getFiles();
@@ -943,11 +952,116 @@ function scanCopies_() {
       if (!m) { ok++; continue; }        // この形でないものは触らない
 
       if (known[m[3]]) { ok++; continue; }
+
+      // 消すのは作り直せるものだけ。出荷日が当日以前の指図書は
+      // SORT_SKIP_PAST で対象外になり、消しても二度と作られない。
+      // 名前は正しいがマスタに未登録なだけ、というコピーを
+      // 消して失うことがあったため、ここで止める。
+      if (shipDateNum_(m[1]) <= today) {
+        作り直せない.push({ 場所: index[kg].path + '/' + name, 出荷先: m[3] });
+        ok++;
+        continue;
+      }
+
       bad.push({ id: f.getId(), 場所: index[kg].path + '/' + name, 出荷先: m[3] });
     }
   });
 
-  return { 一致した件数: ok, 一致しない: bad, マスタ件数: Object.keys(master).length };
+  return {
+    一致した件数: ok,
+    一致しない: bad,
+    作り直せないので残した: 作り直せない,
+    マスタ件数: Object.keys(master).length
+  };
+}
+
+/**
+ * trashGarbledCopies で消しすぎたコピーをゴミ箱から戻す。
+ *
+ * trashGarbledCopies は「マスタの会社名と一致しない」ものを消す作りに
+ * なっていた。そのため、名前は正しいがマスタに未登録なだけ、という
+ * コピーまで消してしまった。出荷日が当日以前のものは SORT_SKIP_PAST で
+ * 再作成されないため、戻すしかない。
+ *
+ * 名前が崩れていたものは、戻したうえで RESTORE_RENAME の名前に直す。
+ * 直す先は、同じ得意先の他のコピーが正しく読めている回の表記。
+ */
+var RESTORE_NAMES = [
+  '26.09.24_26-10681-0(1)_ENEOS夕口一工十一株式会社 福井嶺南支店.pdf',
+  '26.09.24_26-10685-0(1)_大崎産業株式会社 貴志川LPGセンター.pdf',
+  '26.09.24_26-60721-0(1)_株式会社 互恵石油瓦斯.pdf',
+  '26.09.24_26-20326-0(1)_株式会社ホームエネルギー山陰 米子センター.pdf',
+  '26.09.24_26-20327-0(1)_岩谷産業(株) 平田LPGターミナル.pdf',
+  '26.09.24_26-20320-0_(株)ホームエネルギー山陰 浜田センター.pdf',
+  '26.09.24_26-20323-0(1)_(株)ホームエネルギー山陰 浜田センター.pdf',
+  '26.09.24_26-20325-0(1)_岩谷産業(株) 鳥取工場.pdf',
+  '26.09.24_26-70247-0(1)_株式会社花川エネルギーセンター.pdf',
+  '26.09.24_26-70247-0(2)_株式会社花川エネルギーセンター.pdf',
+  '26.09.24_26-60619-0_(株)福岡LPG七夕一 東事業所.pdf',
+  '26.09.24_26-60619-0(2)_(株)福岡LPGセンター 東事業所.pdf',
+  '26.09.24_26-60619-0(3)_(株)福岡LPG夕一 東事業所.pdf',
+  '26.09.24_26-60619-0(4)_(株)福岡LPG夕一東事業所.pdf',
+  '26.09.24_26-20298-0(1)_山陰酸素工業(株) 鳥取南ガスセンター.pdf',
+  '26.09.24_26-20298-0(2)_山陰酸素工業(株) 鳥取南ガスセンター.pdf',
+  '26.09.24_26-20324-0(1)_(株)本一工ㄦ半一山陰 浜田夕一.pdf'
+];
+
+// 崩れているものを正しい表記へ。同じ得意先の読めている回に合わせた。
+var RESTORE_RENAME = {
+  '26.09.24_26-10681-0(1)_ENEOS夕口一工十一株式会社 福井嶺南支店.pdf':
+    '26.09.24_26-10681-0(1)_ENEOSグローバル株式会社 福井嶺南支店.pdf',
+  '26.09.24_26-60619-0_(株)福岡LPG七夕一 東事業所.pdf':
+    '26.09.24_26-60619-0_(株)福岡LPGセンター 東事業所.pdf',
+  '26.09.24_26-60619-0(3)_(株)福岡LPG夕一 東事業所.pdf':
+    '26.09.24_26-60619-0(3)_(株)福岡LPGセンター 東事業所.pdf',
+  '26.09.24_26-60619-0(4)_(株)福岡LPG夕一東事業所.pdf':
+    '26.09.24_26-60619-0(4)_(株)福岡LPGセンター 東事業所.pdf',
+  '26.09.24_26-20324-0(1)_(株)本一工ㄦ半一山陰 浜田夕一.pdf':
+    '26.09.24_26-20324-0(1)_(株)ホームエネルギー山陰 浜田センター.pdf'
+};
+
+function restoreTrashedCopies() {
+  var wanted = {};
+  RESTORE_NAMES.forEach(function (n) { wanted[n] = true; });
+
+  var restored = [], renamed = [], token = null;
+
+  do {
+    var res = Drive.Files.list({
+      q: "trashed = true and mimeType = 'application/pdf'",
+      fields: 'nextPageToken, files(id, name)',
+      pageSize: 1000,
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+      corpora: 'allDrives',
+      pageToken: token
+    });
+
+    (res.files || []).forEach(function (f) {
+      if (!wanted[f.name]) return;
+      delete wanted[f.name];
+
+      Drive.Files.update({ trashed: false }, f.id, null, { supportsAllDrives: true });
+      restored.push(f.name);
+
+      var to = RESTORE_RENAME[f.name];
+      if (to) {
+        Drive.Files.update({ name: to }, f.id, null, { supportsAllDrives: true });
+        renamed.push(f.name + '  →  ' + to);
+      }
+    });
+
+    token = res.nextPageToken;
+  } while (token);
+
+  var out = {
+    戻した件数: restored.length,
+    名前を直した: renamed,
+    見つからなかった: Object.keys(wanted),
+    一覧: restored
+  };
+  Logger.log(JSON.stringify(out, null, 2));
+  return out;
 }
 
 /**
