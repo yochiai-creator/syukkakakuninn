@@ -16,8 +16,13 @@
  * OCR なので読み損ねはあり得る。サイズを判別できなかったファイルは
  * どこにも入れずスキップし、最後にまとめて報告する。
  *
- * 使い方: エディタで sortShippingOrders を実行する。
- * 何度実行してもよい。コピー済みのものは飛ばす。
+ * 使い方
+ *   はじめに1回だけ installSortTrigger を実行する。あとは毎朝勝手に回る。
+ *   すぐ回したいときは runSort を実行する。何度実行してもよい。
+ *
+ *   新しい得意先は、得意先マスタの表に自動で行が足される(会社名は空欄)。
+ *   B列に正しい会社名を書けば、次の実行からその名前になり、
+ *   既に作ったコピーの名前も直る。表の場所は openCustomerMaster で出る。
  */
 
 // 元: '002_出荷作業指図書 (この下が <年>年/<月>月)
@@ -25,11 +30,6 @@ var SRC_ROOT_ID = '13qWXWwBXgbEO9avO5qlnZ0WHDaMSaYA_';
 
 // 先: ◆容器種類別
 var SORT_DEST_ROOT_ID = '1qCpeKIO3gvPWkVDqXApVREDEiWKU_3D6';
-
-// 1回の実行で処理する最大件数。
-// 1ファイルごとに OCR 変換が走るので、まとめてやると数分かかり
-// エディタが回りっぱなしになる。少しずつ何度も回す方が状況が分かる。
-var SORT_MAX_PER_RUN = 10;
 
 // 実行時間の上限(GASの6分制限に対する余裕)。
 // 1件あたりの所要時間ぶんは残しておくこと。
@@ -39,7 +39,6 @@ var SORT_TIME_BUDGET_MS = 5 * 60 * 1000;
 // 'ja' は実際に読めることを確認済み。ただし1件17秒かかる。
 // '' にすると OCR を省いて速くなるが、PDF が文字を持っている場合に
 // 限る。持っていなければ何も読めずスキップになる。
-// 切り替える前に sortBenchmark で読めることを確かめること。
 var SORT_OCR_LANGUAGE = 'ja';
 
 // 出荷日が当日以前のものは対象にしない。
@@ -61,14 +60,69 @@ var SORT_MOVE_OVERDUE = true;
 var MASTER_PARENT_ID = '1iSYAN13NXaxaLkhVdEywcJkJ0YdVULBu';
 var PROP_MASTER_SHEET = 'CUSTOMER_MASTER_ID';
 
+// 毎日の自動実行の時刻(時)。出社前に片付いているように朝にする。
+var SORT_DAILY_HOUR = 6;
+
+// 時間切れで残りが出たときの続きの実行。1回ぶんのトリガーの ID を持つ。
+var PROP_CONTINUE_TRIGGER = 'SORT_CONTINUE_TRIGGER';
+var SORT_CONTINUE_AFTER_MS = 2 * 60 * 1000;
+
 
 /**
- * 当月ぶんを振り分ける。
- * @return {Object} 処理結果のまとめ
+ * 振り分けを1回ぶん回す。毎朝のトリガーもこれを呼ぶ。
+ *
+ *   1. 新しい指図書を容器種類別へコピーする
+ *   2. マスタの会社名が変わっていれば、コピーの名前を直す
+ *   3. 出荷日を過ぎた未チェックのコピーを '004_要確認 へ移す
+ *   4. マスタに無い得意先を表に書き足す(会社名は空欄)
+ *
+ * 時間切れで残りが出たら、2分後にもう一度自分を呼ぶ。
  */
-function sortShippingOrders() {
-  return sortMonths_(targetMonths_(), SORT_MAX_PER_RUN);
+function runSort() {
+  // 毎朝のぶんと続きのぶんが重ならないようにする
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10 * 1000)) {
+    Logger.log('前の実行がまだ続いているので、今回は飛ばしました。');
+    return;
+  }
+
+  try {
+    clearContinueTrigger_();
+
+    // マスタを先に読んでおく。読めないまま進むと、全件 OCR したうえで
+    // 会社名を崩れた読みのまま付けてしまう。読めなければここで止める
+    // (トリガーの失敗はメールで知らせが来る)。
+    loadCustomerMaster_();
+
+    var r = sortMonths_(targetMonths_(), 100000);  // 打ち切りは時間の方で効かせる
+
+    put_(r, '名前を直した', step_(renameCopiesFromMaster_));
+    if (SORT_MOVE_OVERDUE) put_(r, '要確認へ移した', step_(moveOverdueCopies_));
+    put_(r, '表に足した得意先', step_(function () { return appendUnknownCustomers_(r.未登録); }));
+
+    if (r.残り) scheduleContinue_();
+
+    return finishResult_(r);
+  } finally {
+    lock.releaseLock();
+  }
 }
+
+/** 後段の処理は1つ失敗しても他を止めない。結果に理由を残す。 */
+function step_(fn) {
+  try { return fn(); } catch (e) { return '失敗: ' + e.message; }
+}
+
+/** { 件数, 一覧 } を結果に載せる。一覧は1件以上のときだけ。 */
+function put_(result, key, v) {
+  if (v && typeof v === 'object') {
+    result[key] = v.件数;
+    if (v.件数) result[key + '_一覧'] = v.一覧;
+  } else {
+    result[key] = v;
+  }
+}
+
 
 /** 当月から SORT_MONTHS_AHEAD か月先までの [年, 月]。年またぎも扱える。 */
 function targetMonths_() {
@@ -118,80 +172,11 @@ function sortMonths_(months, max) {
     left -= r.コピー.length + r.skip.length;
   });
 
-  return finishResult_(all);
+  return all;
 }
 
-/**
- * まず1件だけ処理して所要時間を見る。
- * OCR が効くか、1件あたり何秒かかるかを確かめてから本番を回す。
- */
-function sortTestOne() {
-  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
-  var now = new Date();
-  var t = Date.now();
-  var r = sortShippingOrdersFor(
-    Utilities.formatDate(now, tz, 'yyyy') + '年',
-    Number(Utilities.formatDate(now, tz, 'M')) + '月',
-    1
-  );
-  r.所要秒 = Math.round((Date.now() - t) / 100) / 10;
-  Logger.log('1件あたり約 ' + r.所要秒 + ' 秒');
-  return r;
-}
-
-/**
- * 当月フォルダの先頭1件で、OCR あり / なし の速さと読み取り結果を比べる。
- * 何もコピーしないので安全。どちらを使うか決めるために実行する。
- */
-function sortBenchmark() {
-  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
-  var now = new Date();
-  var src = findChildFolder_(SRC_ROOT_ID, Utilities.formatDate(now, tz, 'yyyy') + '年');
-  src = findChildFolder_(src, Number(Utilities.formatDate(now, tz, 'M')) + '月');
-
-  var it = DriveApp.getFolderById(src).getFilesByType(MimeType.PDF);
-  if (!it.hasNext()) throw new Error('PDF がありません');
-  var file = it.next();
-
-  var keep = SORT_OCR_LANGUAGE;
-  var out = { ファイル: file.getName(), 結果: [] };
-
-  ['', 'ja'].forEach(function (mode) {
-    SORT_OCR_LANGUAGE = mode;
-    var t = Date.now();
-    var row = { OCR: mode ? 'あり' : 'なし' };
-    try {
-      var text = readPdfText_(file);
-      row.秒 = Math.round((Date.now() - t) / 100) / 10;
-      row.文字数 = text.length;
-      row.容器サイズ = extractSizeKg_(text) || '読めず';
-      row.出荷先 = extractDestination_(text) || '読めず';
-    } catch (e) {
-      row.秒 = Math.round((Date.now() - t) / 100) / 10;
-      row.エラー = e.message;
-    }
-    out.結果.push(row);
-  });
-
-  SORT_OCR_LANGUAGE = keep;
-  Logger.log(JSON.stringify(out, null, 2));
-  return out;
-}
-
-/**
- * 年月を指定して振り分ける。過去の月をやり直すとき用。
- * @param {string} yearName  例 '2026年'
- * @param {string} monthName 例 '9月'
- */
 var sortTodayNum_ = 0;   // 20260919 の形。当日以前の判定に使う
 var sortStarted_  = 0;   // 実行の開始時刻。複数の月にまたがっても1つで数える
-
-function sortShippingOrdersFor(yearName, monthName, limit) {
-  sortStarted_ = Date.now();
-  var r = runMonth_(yearName, monthName, limit || SORT_MAX_PER_RUN);
-  r.対象 = [yearName + '/' + monthName];
-  return finishResult_(r);
-}
 
 /** 1か月ぶんを処理する。開始時刻は sortStarted_ を共有する。 */
 function runMonth_(yearName, monthName, max) {
@@ -247,10 +232,9 @@ function runMonth_(yearName, monthName, max) {
   return result;
 }
 
-/** 未登録のまとめとメモ書きを付けて返す。 */
+/** 未登録のまとめとメモ書きを付けて、実行ログに出す。 */
 function finishResult_(result) {
-  // 未登録はコードごとにまとめる。同じ得意先が何件も並ぶと見づらく、
-  // マスタへ写すときにも邪魔になる。
+  // 未登録はコードごとにまとめる。同じ得意先が何件も並ぶと見づらい。
   var seen = {}, rows = [];
   result.未登録.forEach(function (u) {
     var key = u.コード;
@@ -260,76 +244,78 @@ function finishResult_(result) {
   });
   result.未登録 = rows;
 
-  // そのままマスタに貼れる形。名前が崩れているものは直してから使う。
-  result.マスタ追記用 = rows
-    .filter(function (r) { return r.コード !== '読めず'; })
-    .map(function (r) { return r.コード + ',' + r.OCRの名前; });
+  var memo = [];
+  memo.push(result.残り
+    ? '残り ' + result.残り + ' 件。2分後に続きを自動で回します。'
+    : '対象の月は全部終わりました。');
 
-  // 出荷日を過ぎた未チェックぶんを分ける。振り分けの直後に毎回やる。
-  // 過去日の指図書は SORT_SKIP_PAST で対象外になるため、移したものが
-  // 次の実行で作り直されることはない。
-  if (SORT_MOVE_OVERDUE) {
-    try {
-      var over = moveOverdueCopies();
-      result.要確認へ移した = over.移した件数;
-      if (over.移した件数) result.要確認の一覧 = over.一覧;
-    } catch (e) {
-      result.要確認へ移した = '失敗: ' + e.message;
-    }
+  if (result.名前を直した > 0) {
+    memo.push('マスタに合わせてコピーの名前を ' + result.名前を直した + ' 件直しました。');
   }
-
-  result.メモ = result.残り
-    ? '残り ' + result.残り + ' 件。もう一度 sortShippingOrders を実行すれば続きから進みます。'
-    : '対象の月は全部終わりました。';
-
-  if (result.対象外) {
-    result.メモ += ' 出荷日が当日以前のため対象外にしたものが ' +
-      result.対象外 + ' 件あります。';
+  if (result.要確認へ移した > 0) {
+    memo.push('出荷日を過ぎたまま残っていた ' + result.要確認へ移した + ' 件を 要確認 へ移しました。');
   }
-  if (result.要確認へ移した) {
-    result.メモ += ' 出荷日を過ぎたまま残っていた ' + result.要確認へ移した +
-      ' 件を 要確認 へ移しました。';
+  if (result.表に足した得意先 > 0) {
+    memo.push('新しい得意先を ' + result.表に足した得意先 + ' 件、得意先マスタに足しました。' +
+      'B列(会社名)が空欄の行に正しい名前を書いてください。');
   }
-  if (rows.length) {
-    result.メモ += ' マスタに無い得意先が ' + rows.length +
-      ' 件あります。マスタ追記用 の行を得意先マスタに貼り、' +
-      '崩れている会社名を直してください。次回から正確になります。';
-  }
+  result.メモ = memo.join(' ');
 
   Logger.log(JSON.stringify(result, null, 2));
   return result;
 }
 
-/* ---------------- 自動で回す(任意) ---------------- */
+/* ---------------- 自動で回す ---------------- */
 
 /**
- * 自動実行用。件数で区切らず、3分の枠いっぱいまで処理する。
- * トリガーは第1引数にイベントを渡してくるので、件数を受け取る関数を
- * そのままトリガーに指定してはいけない(件数のつもりでイベントが入る)。
- */
-function sortShippingOrdersBulk() {
-  return sortMonths_(targetMonths_(), 100000);  // 打ち切りは時間の方で効かせる
-}
-
-/**
- * 10分おきに自動で回す。件数が多いときに、エディタを見ていなくても
- * 少しずつ片付く。終わったら removeSortTrigger で止めること。
+ * 毎朝 SORT_DAILY_HOUR 時に runSort が走るようにする。1回実行すればよい。
+ * 何度実行しても、トリガーは1つにまとまる。
  */
 function installSortTrigger() {
   removeSortTrigger();
-  ScriptApp.newTrigger('sortShippingOrdersBulk').timeBased().everyMinutes(10).create();
-  return '10分おきの自動実行を登録しました。終わったら removeSortTrigger を実行してください。';
+  ScriptApp.newTrigger('runSort')
+    .timeBased().everyDays(1).atHour(SORT_DAILY_HOUR)
+    .inTimezone(Session.getScriptTimeZone() || 'Asia/Tokyo')
+    .create();
+
+  var msg = '毎朝 ' + SORT_DAILY_HOUR + ' 時ごろに振り分けが自動で回るようにしました。';
+  Logger.log(msg);
+  return msg;
 }
 
+/** 自動実行を止める。以前の10分おきのトリガーもまとめて消す。 */
 function removeSortTrigger() {
+  var names = { runSort: 1, sortShippingOrdersBulk: 1, sortShippingOrders: 1 };
   var n = 0;
   ScriptApp.getProjectTriggers().forEach(function (t) {
-    var f = t.getHandlerFunction();
-    if (f === 'sortShippingOrdersBulk' || f === 'sortShippingOrders') {
-      ScriptApp.deleteTrigger(t); n++;
-    }
+    if (names[t.getHandlerFunction()]) { ScriptApp.deleteTrigger(t); n++; }
   });
-  return n + ' 件の自動実行を解除しました。';
+  PropertiesService.getScriptProperties().deleteProperty(PROP_CONTINUE_TRIGGER);
+
+  var msg = n + ' 件の自動実行を止めました。';
+  Logger.log(msg);
+  return msg;
+}
+
+/** 時間切れで残ったぶんを、少し後にもう一度回す。 */
+function scheduleContinue_() {
+  var t = ScriptApp.newTrigger('runSort').timeBased().after(SORT_CONTINUE_AFTER_MS).create();
+  PropertiesService.getScriptProperties().setProperty(PROP_CONTINUE_TRIGGER, t.getUniqueId());
+}
+
+/**
+ * 前回の続き用トリガーを消す。1回ぶんのトリガーは発火後も残るため。
+ * 毎朝のトリガーは ID が違うので消さない。
+ */
+function clearContinueTrigger_() {
+  var props = PropertiesService.getScriptProperties();
+  var id = props.getProperty(PROP_CONTINUE_TRIGGER);
+  if (!id) return;
+
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getUniqueId() === id) ScriptApp.deleteTrigger(t);
+  });
+  props.deleteProperty(PROP_CONTINUE_TRIGGER);
 }
 
 
@@ -384,38 +370,62 @@ function sortOne_(file, sizeFolders, doneNames, result) {
     });
   }
 
-  var newName = prefix + (to || '出荷先不明') + '.pdf';
+  var newName = copyName_(prefix, to);
 
-  DriveApp.getFolderById(dest.id).createFile(file.getBlob().setName(newName));
+  var copy = DriveApp.getFolderById(dest.id).createFile(file.getBlob().setName(newName));
+
+  // 得意先コードをファイルの説明に残す。あとでマスタの会社名が
+  // 直されたとき、OCR をやり直さずにこのコピーの名前を直せる。
+  if (code) copy.setDescription(CODE_TAG + code);
+
   doneNames.push(newName);   // 同じ実行の中でも二重にコピーしない
   result.コピー.push(dest.path + '/' + newName);
   return 'copied';
 }
 
 
+/** コピーの名前。振り分け時と、あとで直すときで同じ付け方にする。 */
+function copyName_(prefix, to) {
+  return prefix + (to || '出荷先不明') + '.pdf';
+}
+
+// コピーの「説明」に残す得意先コードの書き方
+var CODE_TAG = '得意先コード:';
+
+
 /* ---------------- 得意先マスタ ---------------- */
 
 /**
- * 得意先マスタを作る。初回に一度だけ実行する。
- * 既にあれば作らず URL を返す。
+ * 得意先マスタの表の URL を実行ログに出す。表を開きたいとき用。
+ *
+ * 表の見方
+ *   A列 得意先コード / B列 会社名 / C列 OCRの読み(参考) / D列 例
+ *   B列が空欄の行は、振り分けで見つかった新しい得意先。
+ *   C列の読みと原本を見比べて、B列に正しい会社名を書く。
+ *   書いた名前は次の実行から使われ、既に作ったコピーの名前も直る。
+ */
+function openCustomerMaster() {
+  var url = 'https://docs.google.com/spreadsheets/d/' + masterId_() + '/edit';
+  Logger.log(url);
+  return url;
+}
+
+/**
+ * 得意先マスタの ID。無ければ作る。
  *
  * CSV を Drive に投げると変換されてスプレッドシートになる。
  * SpreadsheetApp を使うと spreadsheets スコープが要り、再認可で
  * ウェブアプリにも影響が出るため、この作り方にしている。
  */
-function setupCustomerMaster() {
+function masterId_() {
   var props = PropertiesService.getScriptProperties();
   var id = props.getProperty(PROP_MASTER_SHEET);
 
   if (id) {
     try {
-      var f = DriveApp.getFileById(id);
-      if (!f.isTrashed()) return { 状態: '既にあります', url: f.getUrl() };
+      if (!DriveApp.getFileById(id).isTrashed()) return id;
     } catch (e) { /* 消されていれば作り直す */ }
   }
-
-  var csv = '得意先コード,会社名\n';
-  var blob = Utilities.newBlob(csv, 'text/csv', 'master.csv');
 
   var ss = Drive.Files.create(
     {
@@ -423,158 +433,75 @@ function setupCustomerMaster() {
       mimeType: MimeType.GOOGLE_SHEETS,
       parents: [MASTER_PARENT_ID]
     },
-    blob,
+    Utilities.newBlob(MASTER_HEADER.join(',') + '\n', 'text/csv', 'master.csv'),
     { supportsAllDrives: true }
   );
-
   props.setProperty(PROP_MASTER_SHEET, ss.id);
-  return {
-    状態: '作りました',
-    url: 'https://docs.google.com/spreadsheets/d/' + ss.id + '/edit',
-    使い方: 'A列に得意先コード、B列に正しい会社名を入れてください。'
-  };
+  return ss.id;
+}
+
+var MASTER_HEADER = ['得意先コード', '会社名', 'OCRの読み(参考)', '例'];
+
+/**
+ * 表の中身を行の配列で返す(見出しは除く)。
+ * 空欄の列も落とさず、4列にそろえて返す。
+ */
+function readMasterRows_() {
+  var res = UrlFetchApp.fetch(
+    'https://www.googleapis.com/drive/v3/files/' + masterId_() + '/export?mimeType=text/csv',
+    {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true
+    }
+  );
+  if (res.getResponseCode() !== 200) {
+    throw new Error('得意先マスタを読めません (HTTP ' + res.getResponseCode() + ')');
+  }
+
+  return parseCsv_(res.getContentText()).slice(1)
+    .filter(function (row) { return String(row[0] || '').trim(); })
+    .map(function (row) {
+      var r = [];
+      for (var i = 0; i < MASTER_HEADER.length; i++) r.push(String(row[i] || '').trim());
+      return r;
+    });
 }
 
 /**
- * ここに得意先を書いて registerCustomers を実行すると、マスタに入る。
- * エディタの実行ボタンは引数を渡せないため、この形にしている。
- * 追加したいときはこの表に行を足してから実行する。
- * 既に入っているコードは新しい方で上書きされる。
- */
-var CUSTOMER_ROWS = [
-  // 指図書の原本で確認済み
-  ['8537', '㈱小国資源開発'],
-  ['0820', 'ひかり工機株式会社'],
-  ['3580', '(株)サイサン 磐田工場'],
-  ['C942', '福岡LPGセンター(株)福岡西事業所'],
-  ['J177', '中部プロパン株式会社供給管理センター'],
-  ['4108', '(株)ホームエネルギー北陸 能登センター'],
-  ['8515', '(株)ホームエネルギー南九州 熊本センター'],
-
-  // 複数回とも同じに読めており、内容の確認も取れたもの
-  ['6757', '株式会社チョープロ 大島営業所'],
-  ['G757', '株式会社チョープロ 大島営業所'],   // 6 を G と誤読する分
-  ['B070', '東邦液化ガス(株)岡崎充填所'],
-  ['H860', '(株)ホームエネルギー近畿 田辺センター'],
-  ['6182', 'JA全農とっとり 資材部 生活燃料課'],
-
-  // 読めてはいるが原本での確認は未了。違っていれば直すこと
-  ['6862', '(株)アストモスガスセンター広島 福山営業所'],
-  ['5906', '岩谷産業株式会社 淡路工場'],
-  ['J450', 'イワタニ四国(株)徳島支店'],
-  ['B035', '東邦液化ガス株式会社 八開充填所'],
-
-  // 崩れずに読めていたもの。明らかな誤りだけ直してある
-  ['B327', '米子エルピーガスセンター株式会社'],
-  ['8086', '吉村アクティブ産業(株)'],
-  ['3306', '飯田瓦斯(株)'],
-  ['5106', '(株)ホームエネルギー近畿 京都工場'],
-  ['B333', '山陰LPガス共同ターミナル(株)'],
-  ['8644', '(株)ホームエネルギー南九州 人吉センター'],   // 同じ実行で綺麗に読めた版を採用
-  ['G716', '(株)りゅうせき 北部物流センター'],            // 括弧の重複と長音の欠けを補正
-  ['8904', '岩谷産業(株) 宮崎工場'],                      // 產 → 産
-  ['1740', '(株)コープエナジー'],                         // 余分な空白を除去
-
-  // 指図書の原本で出荷先の行を直接確認した
-  ['8663', '(株)ホームエネルギー南九州 山鹿センター'],
-  ['5904', '岩谷産業(株) 東播磨工場'],
-  ['4248', '株式会社ホームエネルギー近畿和田山センター'],   // 空白なしが正
-  ['5905', '(株)ホームエネルギー近畿 明石工場'],            // こちらは空白あり
-  ['8268', '山代ガス(株) 西有田工場'],
-
-  // OCR は ヰ を キ と読む。正しい表記を確認のうえ登録した
-  ['9431', 'マルヰ産業(株) 中部営業所'],
-  ['6588', '大和マルヰガス(株) 吉備工場'],
-  ['9165', '(株)コーアガス日本'],
-
-  // 崩れずに読めたもの。明らかな誤りだけ直した
-  ['4944', '甲賀協同ガス(株)'],
-  ['4722', '川越ガス(株)充填所'],
-  ['4107', '(株)ホームエネルギー北陸 金沢LPGセンター'],
-  ['6184', '(株)エネルギーセンター鳥取気付鳥取ガス産業(株)'],
-  ['7029', '服部産業(株)'],                                  // 產 → 産
-  ['0190', 'エア・ウォーター物流(株)石狩流通センター'],        // 長音の欠けを補正
-  ['J786', '(株)ミツウロコ 西東京店'],                        // 支店名が落ちる回があるので付きを採用
-  ['2538', '垣見油化(株) 瑞穂充填所'],                        // 同上
-
-  // 同じ系列の他拠点と同じ形に揃えた。原本での確認は未了
-  ['5908', '(株)ホームエネルギー近畿 姫路センター'],
-  ['5200', '(株)ホームエネルギー近畿 京都北センター'],
-
-  // 原本で確認した
-  ['6906', '(株)エルピーガス下関'],
-  ['3597', 'ガスコミュニティ静岡 (大井川LPGセンター)'],
-
-  // 崩れずに読めたもの（2巡目）
-  ['2092', '北日本物産(株) 熊谷営業所'],
-  ['5706', '(株)ホームエネルギー近畿 和歌山LPGセンター'],
-  ['8466', '南九州ガスターミナル(株)'],
-  ['6824', '(株)ホームエネルギー山陽 広島LPG物流センター'],
-
-  // 原本で確認した（2巡目）
-  ['9730', '浜松液化ガス株式会社 充填所'],
-  ['1891', '(株)JAエルサポート 宇都宮充填所 ガス事業部'],
-  ['1581', '(株)ガスワン北関東 ひたちなか配送センター'],
-  ['1773', '(株)ガスワン北関東 那須配送センター'],
-
-  // 会社ではなく引き取り。原本の出荷先がこの表記
-  ['6209', '引取り'],
-
-  // trashGarbledCopies で消えた得意先。原本で確認した
-  ['4332', 'ENEOSグローブエナジー株式会社 福井嶺南支店'],
-  ['H024', '大崎産業株式会社 貴志川LPGセンター'],       // OCR は HO24 と読む
-  ['9335', '株式会社 互恵石油瓦斯'],
-  ['6141', '株式会社ホームエネルギー山陰 米子センター'],
-  ['6307', '岩谷産業(株) 平田LPGターミナル'],
-  ['1422', '(株)ホームエネルギー山陰 浜田センター'],
-  ['6106', '岩谷産業(株) 鳥取工場'],
-  ['1474', '株式会社花川エネルギーセンター'],
-  ['A358', '(株)福岡LPGセンター 東事業所'],
-  ['6143', '山陰酸素工業(株) 鳥取南ガスセンター']
-];
-
-/** 上の CUSTOMER_ROWS をマスタに登録する。エディタから実行できる。 */
-function registerCustomers() {
-  return addCustomerMaster(CUSTOMER_ROWS);
-}
-
-/**
- * 得意先マスタに行を足す。既にあるコードは上書きする。
+ * マスタに無い得意先を表に書き足す。会社名(B列)は空欄のまま。
+ * OCR の読みは崩れていることが多いので、会社名には入れず参考として残す。
+ * 既に表にあるコード(会社名が空欄のものも含む)は足さない。
  *
- *   addCustomerMaster([['8537','㈱小国資源開発'], ['0820','ひかり工機']])
+ * 足した行は見つけやすいよう見出しのすぐ下に入れる。
+ * 既存の行の並びは変えない。
  *
- * 書き込みも CSV を Drive に被せる形で行う。SpreadsheetApp を使うと
- * spreadsheets スコープが要り、再認可でウェブアプリにも影響が出る。
- * 既存の行は読み直して残すので、手で入れたものは消えない。
+ * @return {number} 足した件数
  */
-function addCustomerMaster(rows) {
-  if (!rows || !rows.length) throw new Error('追加する行を指定してください');
+function appendUnknownCustomers_(unknowns) {
+  var fresh = (unknowns || []).filter(function (u) { return u.コード && u.コード !== '読めず'; });
+  if (!fresh.length) return 0;
 
-  var id = PropertiesService.getScriptProperties().getProperty(PROP_MASTER_SHEET);
-  if (!id) throw new Error('先に setupCustomerMaster を実行してください');
+  var rows = readMasterRows_();
+  var have = {};
+  rows.forEach(function (r) { have[normCode_(r[0])] = true; });
 
-  customerMasterCache_ = null;          // 手で編集されている場合に備えて読み直す
-  var map = loadCustomerMaster_();
-  var added = [];
-
-  rows.forEach(function (r) {
-    var code = normCode_(r[0]);
-    var name = String(r[1] || '').trim();
-    if (!code || !name) return;
-    added.push(code + ' → ' + name);
-    map[code] = name;
+  var add = [];
+  fresh.forEach(function (u) {
+    var k = normCode_(u.コード);
+    if (have[k]) return;
+    have[k] = true;
+    add.push([u.コード, '', u.OCRの名前 || '', u.例 || u.元 || '']);
   });
+  if (!add.length) return 0;
 
-  var csv = '得意先コード,会社名\n' + Object.keys(map).sort().map(function (k) {
-    return csvCell_(k) + ',' + csvCell_(map[k]);
+  var csv = [MASTER_HEADER].concat(add, rows).map(function (r) {
+    return r.map(csvCell_).join(',');
   }).join('\n') + '\n';
 
-  Drive.Files.update({}, id, Utilities.newBlob(csv, 'text/csv', 'master.csv'),
+  Drive.Files.update({}, masterId_(), Utilities.newBlob(csv, 'text/csv', 'master.csv'),
                      { supportsAllDrives: true });
-
   customerMasterCache_ = null;
-  Logger.log(JSON.stringify({ 追加: added, マスタ件数: Object.keys(map).length }, null, 2));
-  return { 追加: added, マスタ件数: Object.keys(map).length };
+  return add.length;
 }
 
 /**
@@ -596,15 +523,6 @@ function normCode_(code) {
   // なる。表を直しても入力のたびに同じことが起きるため、数字だけの
   // コードは先頭のゼロを無視して比べる。
   return /^\d+$/.test(code) ? String(Number(code)) : code;
-}
-
-/** 登録済みの得意先を一覧する。何が入っているか確かめるとき用。 */
-function showCustomerMaster() {
-  customerMasterCache_ = null;
-  var map = loadCustomerMaster_();
-  var rows = Object.keys(map).sort().map(function (k) { return k + ' → ' + map[k]; });
-  Logger.log(JSON.stringify({ 件数: rows.length, 一覧: rows }, null, 2));
-  return { 件数: rows.length, 一覧: rows };
 }
 
 /** ファイル名の日付を見て、出荷日が当日以前かどうか。読めなければ対象扱い。 */
@@ -631,24 +549,10 @@ var customerMasterCache_ = null;
 function loadCustomerMaster_() {
   if (customerMasterCache_) return customerMasterCache_;
 
-  var id = PropertiesService.getScriptProperties().getProperty(PROP_MASTER_SHEET);
-  if (!id) { customerMasterCache_ = {}; return customerMasterCache_; }
-
-  var res = UrlFetchApp.fetch(
-    'https://www.googleapis.com/drive/v3/files/' + id + '/export?mimeType=text/csv',
-    {
-      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
-      muteHttpExceptions: true
-    }
-  );
-  if (res.getResponseCode() !== 200) { customerMasterCache_ = {}; return customerMasterCache_; }
-
   var map = {};
-  parseCsv_(res.getContentText()).forEach(function (row, i) {
-    if (i === 0) return;                       // 見出し行
-    var code = normCode_(row[0]);
-    var name = String(row[1] || '').trim();
-    if (code && name) map[code] = name;
+  readMasterRows_().forEach(function (r) {
+    var code = normCode_(r[0]);
+    if (code && r[1]) map[code] = r[1];      // 会社名が空欄の行は未登録扱い
   });
 
   customerMasterCache_ = map;
@@ -909,177 +813,6 @@ function alreadyCopied_(prefix, doneNames) {
 }
 
 /**
- * 振り分け済みのコピーのうち、出荷先がマスタの名前と一致しないものを探す。
- * 消さずに一覧にするだけ。まずこれで中身を見てから trashGarbledCopies を使う。
- *
- * マスタに載っている得意先なら、正しい名前で入っていれば一致する。
- * 一致しないものは OCR が崩れたまま入っているか、まだマスタに無い得意先。
- */
-function listGarbledCopies() {
-  var found = scanCopies_();
-  Logger.log(JSON.stringify(found, null, 2));
-  return found;
-}
-
-/**
- * 上で見つかったコピーをゴミ箱へ移す。元の指図書には触らない。
- * 消したあと sortShippingOrders を実行すると、マスタを使って
- * 正しい名前で入り直す。
- */
-function trashGarbledCopies() {
-  var found = scanCopies_();
-  found.一致しない.forEach(function (r) {
-    DriveApp.getFileById(r.id).setTrashed(true);
-  });
-
-  var out = { 消した件数: found.一致しない.length, 残した件数: found.一致した件数,
-              一覧: found.一致しない.map(function (r) { return r.場所; }) };
-
-  // 出荷日が過ぎていて作り直せないものは消していない。
-  // 名前が崩れていたら手で直すか、マスタに登録して次回から正しくする。
-  if (found.作り直せないので残した.length) {
-    out.作り直せないので残した = found.作り直せないので残した;
-  }
-  Logger.log(JSON.stringify(out, null, 2));
-  return out;
-}
-
-/** 振り分け先を見て、マスタの名前と一致するか調べる。 */
-function scanCopies_() {
-  var tz    = Session.getScriptTimeZone() || 'Asia/Tokyo';
-  var today = Number(Utilities.formatDate(new Date(), tz, 'yyyyMMdd'));
-
-  var index  = buildSizeIndex_(SORT_DEST_ROOT_ID);
-  var master = loadCustomerMaster_();
-
-  var known = {};
-  Object.keys(master).forEach(function (k) { known[master[k]] = true; });
-
-  var bad = [], ok = 0, 作り直せない = [];
-
-  Object.keys(index).forEach(function (kg) {
-    var it = DriveApp.getFolderById(index[kg].id).getFiles();
-    while (it.hasNext()) {
-      var f = it.next(), name = f.getName();
-
-      // 26.09.25_26-60754-0(1)_会社名.pdf
-      var m = name.match(/^(\d{2}\.\d{2}\.\d{2})_([^_]+)_(.+)\.pdf$/i);
-      if (!m) { ok++; continue; }        // この形でないものは触らない
-
-      if (known[m[3]]) { ok++; continue; }
-
-      // 消すのは作り直せるものだけ。出荷日が当日以前の指図書は
-      // SORT_SKIP_PAST で対象外になり、消しても二度と作られない。
-      // 名前は正しいがマスタに未登録なだけ、というコピーを
-      // 消して失うことがあったため、ここで止める。
-      if (shipDateNum_(m[1]) <= today) {
-        作り直せない.push({ 場所: index[kg].path + '/' + name, 出荷先: m[3] });
-        ok++;
-        continue;
-      }
-
-      bad.push({ id: f.getId(), 場所: index[kg].path + '/' + name, 出荷先: m[3] });
-    }
-  });
-
-  return {
-    一致した件数: ok,
-    一致しない: bad,
-    作り直せないので残した: 作り直せない,
-    マスタ件数: Object.keys(master).length
-  };
-}
-
-/**
- * trashGarbledCopies で消しすぎたコピーをゴミ箱から戻す。
- *
- * trashGarbledCopies は「マスタの会社名と一致しない」ものを消す作りに
- * なっていた。そのため、名前は正しいがマスタに未登録なだけ、という
- * コピーまで消してしまった。出荷日が当日以前のものは SORT_SKIP_PAST で
- * 再作成されないため、戻すしかない。
- *
- * 名前が崩れていたものは、戻したうえで RESTORE_RENAME の名前に直す。
- * 直す先は、同じ得意先の他のコピーが正しく読めている回の表記。
- */
-var RESTORE_NAMES = [
-  '26.09.24_26-10681-0(1)_ENEOS夕口一工十一株式会社 福井嶺南支店.pdf',
-  '26.09.24_26-10685-0(1)_大崎産業株式会社 貴志川LPGセンター.pdf',
-  '26.09.24_26-60721-0(1)_株式会社 互恵石油瓦斯.pdf',
-  '26.09.24_26-20326-0(1)_株式会社ホームエネルギー山陰 米子センター.pdf',
-  '26.09.24_26-20327-0(1)_岩谷産業(株) 平田LPGターミナル.pdf',
-  '26.09.24_26-20320-0_(株)ホームエネルギー山陰 浜田センター.pdf',
-  '26.09.24_26-20323-0(1)_(株)ホームエネルギー山陰 浜田センター.pdf',
-  '26.09.24_26-20325-0(1)_岩谷産業(株) 鳥取工場.pdf',
-  '26.09.24_26-70247-0(1)_株式会社花川エネルギーセンター.pdf',
-  '26.09.24_26-70247-0(2)_株式会社花川エネルギーセンター.pdf',
-  '26.09.24_26-60619-0_(株)福岡LPG七夕一 東事業所.pdf',
-  '26.09.24_26-60619-0(2)_(株)福岡LPGセンター 東事業所.pdf',
-  '26.09.24_26-60619-0(3)_(株)福岡LPG夕一 東事業所.pdf',
-  '26.09.24_26-60619-0(4)_(株)福岡LPG夕一東事業所.pdf',
-  '26.09.24_26-20298-0(1)_山陰酸素工業(株) 鳥取南ガスセンター.pdf',
-  '26.09.24_26-20298-0(2)_山陰酸素工業(株) 鳥取南ガスセンター.pdf',
-  '26.09.24_26-20324-0(1)_(株)本一工ㄦ半一山陰 浜田夕一.pdf'
-];
-
-// 崩れているものを正しい表記へ。同じ得意先の読めている回に合わせた。
-var RESTORE_RENAME = {
-  '26.09.24_26-10681-0(1)_ENEOS夕口一工十一株式会社 福井嶺南支店.pdf':
-    '26.09.24_26-10681-0(1)_ENEOSグローブエナジー株式会社 福井嶺南支店.pdf',
-  '26.09.24_26-60619-0_(株)福岡LPG七夕一 東事業所.pdf':
-    '26.09.24_26-60619-0_(株)福岡LPGセンター 東事業所.pdf',
-  '26.09.24_26-60619-0(3)_(株)福岡LPG夕一 東事業所.pdf':
-    '26.09.24_26-60619-0(3)_(株)福岡LPGセンター 東事業所.pdf',
-  '26.09.24_26-60619-0(4)_(株)福岡LPG夕一東事業所.pdf':
-    '26.09.24_26-60619-0(4)_(株)福岡LPGセンター 東事業所.pdf',
-  '26.09.24_26-20324-0(1)_(株)本一工ㄦ半一山陰 浜田夕一.pdf':
-    '26.09.24_26-20324-0(1)_(株)ホームエネルギー山陰 浜田センター.pdf'
-};
-
-function restoreTrashedCopies() {
-  var wanted = {};
-  RESTORE_NAMES.forEach(function (n) { wanted[n] = true; });
-
-  var restored = [], renamed = [], token = null;
-
-  do {
-    var res = Drive.Files.list({
-      q: "trashed = true and mimeType = 'application/pdf'",
-      fields: 'nextPageToken, files(id, name)',
-      pageSize: 1000,
-      includeItemsFromAllDrives: true,
-      supportsAllDrives: true,
-      corpora: 'allDrives',
-      pageToken: token
-    });
-
-    (res.files || []).forEach(function (f) {
-      if (!wanted[f.name]) return;
-      delete wanted[f.name];
-
-      Drive.Files.update({ trashed: false }, f.id, null, { supportsAllDrives: true });
-      restored.push(f.name);
-
-      var to = RESTORE_RENAME[f.name];
-      if (to) {
-        Drive.Files.update({ name: to }, f.id, null, { supportsAllDrives: true });
-        renamed.push(f.name + '  →  ' + to);
-      }
-    });
-
-    token = res.nextPageToken;
-  } while (token);
-
-  var out = {
-    戻した件数: restored.length,
-    名前を直した: renamed,
-    見つからなかった: Object.keys(wanted),
-    一覧: restored
-  };
-  Logger.log(JSON.stringify(out, null, 2));
-  return out;
-}
-
-/**
  * 出荷日を過ぎたのに容器種類別に残っているコピーを '004_要確認 へ移す。
  *
  * チェック完了するとコピーは ◆チェック完了 へ移って元は消える。
@@ -1089,14 +822,14 @@ function restoreTrashedCopies() {
  * 当日ぶんは残す。移すのは出荷日が昨日以前のものだけ。
  * 元の指図書には触らない。移すのはコピーだけ。
  */
-function moveOverdueCopies() {
+function moveOverdueCopies_() {
   var tz    = Session.getScriptTimeZone() || 'Asia/Tokyo';
   var today = Number(Utilities.formatDate(new Date(), tz, 'yyyyMMdd'));
 
   var dest  = overdueFolder_();
   var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
 
-  var moved = [], kept = 0;
+  var moved = [];
 
   Object.keys(index).forEach(function (kg) {
     var it = DriveApp.getFolderById(index[kg].id).getFiles();
@@ -1105,129 +838,64 @@ function moveOverdueCopies() {
 
       // 振り分けが付けた名前は 26.09.25_… の形。違うものは触らない。
       var m = name.match(/^(\d{2}\.\d{2}\.\d{2})_/);
-      if (!m) { kept++; continue; }
+      if (!m) continue;
 
-      if (shipDateNum_(m[1]) >= today) { kept++; continue; }   // 当日ぶんは残す
+      if (shipDateNum_(m[1]) >= today) continue;   // 当日ぶんは残す
 
       f.moveTo(dest);
       moved.push(index[kg].path + '/' + name);
     }
   });
 
-  var out = {
-    移した件数: moved.length,
-    残した件数: kept,
-    移した先: dest.getName(),
-    一覧: moved
-  };
-  Logger.log(JSON.stringify(out, null, 2));
-  return out;
+  return { 件数: moved.length, 一覧: moved };
+}
+
+/**
+ * マスタの会社名に合わせて、コピーの名前を直す。
+ *
+ * 振り分けのときにファイルの説明へ得意先コードを残してあるので、
+ * OCR をやり直さずに済む。表の B列に会社名が書き足されたり直されたり
+ * したら、次の実行でここが名前をそろえる。
+ * 説明にコードが無いコピー(この仕組みより前に作ったもの)は触らない。
+ * 容器種類別と 要確認 の両方を見る。
+ */
+function renameCopiesFromMaster_() {
+  var master = loadCustomerMaster_();
+  var folders = [];
+  var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
+  Object.keys(index).forEach(function (kg) { folders.push(index[kg]); });
+  folders.push({ id: OVERDUE_FOLDER_ID, path: '要確認' });
+
+  var renamed = [];
+
+  folders.forEach(function (fo) {
+    var it = DriveApp.getFolderById(fo.id).getFiles();
+    while (it.hasNext()) {
+      var f = it.next(), name = f.getName();
+
+      var m = name.match(/^(\d{2}\.\d{2}\.\d{2}_[^_]+_)/);   // 26.09.25_26-60749-0(1)_
+      if (!m) continue;
+
+      var tag = String(f.getDescription() || '');
+      if (tag.indexOf(CODE_TAG) !== 0) continue;
+
+      var to = master[normCode_(tag.slice(CODE_TAG.length))];
+      if (!to) continue;                           // まだ会社名が書かれていない
+
+      var want = copyName_(m[1], to);
+      if (want === name) continue;
+
+      f.setName(want);
+      renamed.push(fo.path + '/' + name + '  →  ' + want);
+    }
+  });
+
+  return { 件数: renamed.length, 一覧: renamed };
 }
 
 /** 移す先の要確認フォルダを返す。 */
 function overdueFolder_() {
   return DriveApp.getFolderById(OVERDUE_FOLDER_ID);
-}
-
-/**
- * 1件の指図書について、GAS 側の OCR が出荷先の行をどう読んだかを出す。
- * ファイル名は正しく付いているのに得意先コードで引けない、という形の
- * 不具合を、推測ではなく実際の読みで確かめるためのもの。
- *
- * DEBUG_ORDER_NO に依頼No の一部(例 '50376')を入れて実行する。
- */
-var DEBUG_ORDER_NO = '50376';
-
-function sortDebugOne() {
-  var it = DriveApp.searchFiles(
-    "title contains '" + q_(DEBUG_ORDER_NO) + "' and mimeType = 'application/pdf' and trashed = false"
-  );
-  if (!it.hasNext()) throw new Error(DEBUG_ORDER_NO + ' を含む PDF が見つかりません');
-
-  var file = it.next();
-  var text = readPdfText_(file);
-
-  var m = text.match(/出荷先[:：]?\s*([^\r\n]+)/);
-  var line = m ? m[1] : '';
-
-  var code   = extractCustomerCode_(text);
-  var norm   = normCode_(code);
-  var master = loadCustomerMaster_();
-
-  var out = {
-    ファイル: file.getName(),
-    出荷先の行: line,
-    文字コード: codePoints_(line.slice(0, 24)),
-    出荷先の出現回数: (text.match(/出荷先/g) || []).length,
-    読めたコード: code || '(空)',
-    正規化したコード: norm || '(空)',
-    マスタにある: !!master[norm],
-    マスタの名前: master[norm] || '(無し)',
-    コードを落とした名前: extractDestination_(text)
-  };
-
-  Logger.log(JSON.stringify(out, null, 2));
-  return out;
-}
-
-/** 先頭の文字を U+XXXX で並べる。全角と半角の取り違えを見分けるため。 */
-function codePoints_(s) {
-  var out = [];
-  for (var i = 0; i < s.length; i++) {
-    out.push(s.charAt(i) + ':' + s.charCodeAt(i).toString(16).toUpperCase());
-  }
-  return out.join(' ');
-}
-
-/**
- * ここに 日付_依頼No_ を並べて trashListedCopies を実行すると消える。
- * エディタの実行ボタンは引数を渡せないため、この形にしている。
- * 下は これまでの実行でできたコピー(二重ぶんを含む)。
- */
-var TRASH_PREFIXES = [
-  '26.09.18_26-10713-0(1)_',   // 姫路センターが崩れ。出荷日が過去なので作り直されない
-  '26.09.29_26-50390-0(1)_',   // )工機株式会社 → 0820 ひかり工機 で入り直す
-  '26.09.30_26-60736-0_',      // 福岡LPG它一夕- が崩れ
-  '26.09.30_26-70288-0(1)_',   // BO70 がファイル名に残っている
-  '26.09.30_26-70289-0(1)_'    // 東邦液化ガス の間に余分な空白
-];
-
-/** 上の TRASH_PREFIXES のコピーをゴミ箱へ。エディタから実行できる。 */
-function trashListedCopies() {
-  return trashSortedCopies(TRASH_PREFIXES);
-}
-
-/**
- * 振り分け済みのコピーをゴミ箱へ移す。読み取りを直してやり直すとき用。
- * 元の指図書には触らない。消すのはコピーだけ。
- *
- *   trashSortedCopies(['26.09.25_26-60753-0_', '26.09.29_26-50390-0(1)_'])
- *
- * @param {Array<string>} prefixes 日付_依頼No_ の形の先頭一致
- */
-function trashSortedCopies(prefixes) {
-  if (!prefixes || !prefixes.length) throw new Error('消す対象を指定してください');
-
-  var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
-  var removed = [];
-
-  Object.keys(index).forEach(function (kg) {
-    var folder = DriveApp.getFolderById(index[kg].id);
-    var it = folder.getFiles();
-    while (it.hasNext()) {
-      var f = it.next(), name = f.getName();
-      for (var i = 0; i < prefixes.length; i++) {
-        if (name.indexOf(prefixes[i]) === 0) {
-          f.setTrashed(true);
-          removed.push(index[kg].path + '/' + name);
-          break;
-        }
-      }
-    }
-  });
-
-  Logger.log(JSON.stringify(removed, null, 2));
-  return { 消した件数: removed.length, 一覧: removed };
 }
 
 /** 指定の名前の子フォルダの ID。無ければ空文字。 */
