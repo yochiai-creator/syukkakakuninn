@@ -52,6 +52,12 @@ var SORT_SKIP_PAST = true;
 // これからチェックする指図書を取りこぼす。
 var SORT_MONTHS_AHEAD = 2;
 
+// 出荷日を過ぎたのに容器種類別に残っているコピーを移す先。
+// ◆容器種類別 の直下に置く。容器サイズのフォルダとは名前が違うので
+// 振り分け先として拾われることはない。
+var OVERDUE_FOLDER_NAME = '要確認';
+var SORT_MOVE_OVERDUE   = true;
+
 // 得意先マスタ(コード→会社名)の置き場。'001_【出荷】 の直下に作る。
 var MASTER_PARENT_ID = '1iSYAN13NXaxaLkhVdEywcJkJ0YdVULBu';
 var PROP_MASTER_SHEET = 'CUSTOMER_MASTER_ID';
@@ -250,7 +256,7 @@ function finishResult_(result) {
   result.未登録.forEach(function (u) {
     var key = u.コード;
     if (seen[key]) { seen[key].件数++; return; }
-    seen[key] = { コード: key, OCRの名前: u.OCRの名前, 件数: 1, 例: u.元 };
+    seen[key] = { コード: key, OCRの名前: u.OCRの名前, 出荷先の行: u.出荷先の行, 件数: 1, 例: u.元 };
     rows.push(seen[key]);
   });
   result.未登録 = rows;
@@ -260,6 +266,19 @@ function finishResult_(result) {
     .filter(function (r) { return r.コード !== '読めず'; })
     .map(function (r) { return r.コード + ',' + r.OCRの名前; });
 
+  // 出荷日を過ぎた未チェックぶんを分ける。振り分けの直後に毎回やる。
+  // 過去日の指図書は SORT_SKIP_PAST で対象外になるため、移したものが
+  // 次の実行で作り直されることはない。
+  if (SORT_MOVE_OVERDUE) {
+    try {
+      var over = moveOverdueCopies();
+      result.要確認へ移した = over.移した件数;
+      if (over.移した件数) result.要確認の一覧 = over.一覧;
+    } catch (e) {
+      result.要確認へ移した = '失敗: ' + e.message;
+    }
+  }
+
   result.メモ = result.残り
     ? '残り ' + result.残り + ' 件。もう一度 sortShippingOrders を実行すれば続きから進みます。'
     : '対象の月は全部終わりました。';
@@ -267,6 +286,10 @@ function finishResult_(result) {
   if (result.対象外) {
     result.メモ += ' 出荷日が当日以前のため対象外にしたものが ' +
       result.対象外 + ' 件あります。';
+  }
+  if (result.要確認へ移した) {
+    result.メモ += ' 出荷日を過ぎたまま残っていた ' + result.要確認へ移した +
+      ' 件を ' + OVERDUE_FOLDER_NAME + ' へ移しました。';
   }
   if (rows.length) {
     result.メモ += ' マスタに無い得意先が ' + rows.length +
@@ -926,6 +949,58 @@ function scanCopies_() {
   });
 
   return { 一致した件数: ok, 一致しない: bad, マスタ件数: Object.keys(master).length };
+}
+
+/**
+ * 出荷日を過ぎたのに容器種類別に残っているコピーを ◆容器種類別/要確認 へ移す。
+ *
+ * チェック完了するとコピーは ◆チェック完了 へ移って元は消える。
+ * つまり容器種類別に残っているものは、まだチェックしていないもの。
+ * 出荷日を過ぎたものは見落としなので、目に付くところへ分けておく。
+ *
+ * 当日ぶんは残す。移すのは出荷日が昨日以前のものだけ。
+ * 元の指図書には触らない。移すのはコピーだけ。
+ */
+function moveOverdueCopies() {
+  var tz    = Session.getScriptTimeZone() || 'Asia/Tokyo';
+  var today = Number(Utilities.formatDate(new Date(), tz, 'yyyyMMdd'));
+
+  var dest  = overdueFolder_();
+  var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
+
+  var moved = [], kept = 0;
+
+  Object.keys(index).forEach(function (kg) {
+    var it = DriveApp.getFolderById(index[kg].id).getFiles();
+    while (it.hasNext()) {
+      var f = it.next(), name = f.getName();
+
+      // 振り分けが付けた名前は 26.09.25_… の形。違うものは触らない。
+      var m = name.match(/^(\d{2}\.\d{2}\.\d{2})_/);
+      if (!m) { kept++; continue; }
+
+      if (shipDateNum_(m[1]) >= today) { kept++; continue; }   // 当日ぶんは残す
+
+      f.moveTo(dest);
+      moved.push(index[kg].path + '/' + name);
+    }
+  });
+
+  var out = {
+    移した件数: moved.length,
+    残した件数: kept,
+    移した先: OVERDUE_FOLDER_NAME,
+    一覧: moved
+  };
+  Logger.log(JSON.stringify(out, null, 2));
+  return out;
+}
+
+/** ◆容器種類別/要確認 を返す。無ければ作る。 */
+function overdueFolder_() {
+  var root = DriveApp.getFolderById(SORT_DEST_ROOT_ID);
+  var it   = root.getFoldersByName(OVERDUE_FOLDER_NAME);
+  return it.hasNext() ? it.next() : root.createFolder(OVERDUE_FOLDER_NAME);
 }
 
 /**
