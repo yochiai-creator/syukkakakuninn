@@ -53,10 +53,9 @@ var SORT_SKIP_PAST = true;
 var SORT_MONTHS_AHEAD = 2;
 
 // 出荷日を過ぎたのに容器種類別に残っているコピーを移す先。
-// ◆容器種類別 の直下に置く。容器サイズのフォルダとは名前が違うので
-// 振り分け先として拾われることはない。
-var OVERDUE_FOLDER_NAME = '要確認';
-var SORT_MOVE_OVERDUE   = true;
+// '001_【出荷】/'004_要確認
+var OVERDUE_FOLDER_ID = '1IhDSDZl8bT1x1iqLclanA213cENGIdD3';
+var SORT_MOVE_OVERDUE = true;
 
 // 得意先マスタ(コード→会社名)の置き場。'001_【出荷】 の直下に作る。
 var MASTER_PARENT_ID = '1iSYAN13NXaxaLkhVdEywcJkJ0YdVULBu';
@@ -289,7 +288,7 @@ function finishResult_(result) {
   }
   if (result.要確認へ移した) {
     result.メモ += ' 出荷日を過ぎたまま残っていた ' + result.要確認へ移した +
-      ' 件を ' + OVERDUE_FOLDER_NAME + ' へ移しました。';
+      ' 件を 要確認 へ移しました。';
   }
   if (rows.length) {
     result.メモ += ' マスタに無い得意先が ' + rows.length +
@@ -952,7 +951,7 @@ function scanCopies_() {
 }
 
 /**
- * 出荷日を過ぎたのに容器種類別に残っているコピーを ◆容器種類別/要確認 へ移す。
+ * 出荷日を過ぎたのに容器種類別に残っているコピーを '004_要確認 へ移す。
  *
  * チェック完了するとコピーは ◆チェック完了 へ移って元は消える。
  * つまり容器種類別に残っているものは、まだチェックしていないもの。
@@ -989,18 +988,16 @@ function moveOverdueCopies() {
   var out = {
     移した件数: moved.length,
     残した件数: kept,
-    移した先: OVERDUE_FOLDER_NAME,
+    移した先: dest.getName(),
     一覧: moved
   };
   Logger.log(JSON.stringify(out, null, 2));
   return out;
 }
 
-/** ◆容器種類別/要確認 を返す。無ければ作る。 */
+/** 移す先の要確認フォルダを返す。 */
 function overdueFolder_() {
-  var root = DriveApp.getFolderById(SORT_DEST_ROOT_ID);
-  var it   = root.getFoldersByName(OVERDUE_FOLDER_NAME);
-  return it.hasNext() ? it.next() : root.createFolder(OVERDUE_FOLDER_NAME);
+  return DriveApp.getFolderById(OVERDUE_FOLDER_ID);
 }
 
 /**
