@@ -337,8 +337,21 @@ function diagText(){
     file: curFile ? curFile.name : "", page: pageNo, tool: tool, penSeen: penSeen,
     marks: (marks[pageNo]||[]).length, sentAt: new Date().toString()
   };
+  var snap="";
+  try{
+    var sc=document.createElement("canvas"), W=480;
+    sc.width=W; sc.height=Math.round(W*inkCv.height/inkCv.width);
+    var sx=sc.getContext("2d");
+    sx.fillStyle="#fff"; sx.fillRect(0,0,sc.width,sc.height);
+    sx.globalAlpha=0.35; sx.drawImage(pdfCv,0,0,sc.width,sc.height);   // 紙はうすく
+    sx.globalAlpha=1;    sx.drawImage(inkCv,0,0,sc.width,sc.height);   // 書き込みはそのまま
+    snap=sc.toDataURL("image/png");
+  }catch(err){ snap="err:"+err.message; }
+  head.sheetStyle={ transform: sheet.style.transform, willChange: sheet.style.willChange, inkOpacity: inkCv.style.opacity };
+  head.redraws=redrawCount;
   return JSON.stringify(head, null, 1) + "\n----\n" +
-    diagBuf.map(function(r){ return JSON.stringify(r); }).join("\n");
+    diagBuf.map(function(r){ return JSON.stringify(r); }).join("\n") +
+    "\n----SNAPSHOT----\n" + snap;
 }
 
 /* ペンが紙に触れている間と、離してすぐの間は true。
@@ -1092,12 +1105,18 @@ function stampDate(){
   return (d.getFullYear() % 100) + "." + (d.getMonth()+1) + "." + d.getDate();
 }
 
+var redrawCount=0, inkNudge=false;
 function redraw(){
   inkCtx.setTransform(view.dpr,0,0,view.dpr,0,0);
   inkCtx.clearRect(0,0,view.w,view.h);
   var list=marks[pageNo]||[];
   for(var i=0;i<list.length;i++) paint(inkCtx, list[i], view.w, view.h, 1);
   updateInkButtons();
+  redrawCount++;
+  // iPad で、キャンバスに描いたのに画面に出ないことがある。見た目が
+  // 変わらない程度に不透明度を揺らし、画面への反映をやり直させる。
+  inkNudge = !inkNudge;
+  inkCv.style.opacity = inkNudge ? "0.999" : "1";
 }
 
 function pos(e){
@@ -1168,6 +1187,7 @@ inkCv.addEventListener("pointerdown", function(e){
   }
   drawing={type:"stroke", color:color, size:size, rel:sizeRel(), by:e.pointerType,
            pts:[{x:pt.x, y:pt.y, p:pressure(e)}]};
+  Object.defineProperty(drawing, "redraws0", {value: redrawCount, enumerable: false});
   marks[pageNo].push(drawing);
   setDirty(true);
 
@@ -1193,8 +1213,30 @@ inkCv.addEventListener("pointermove", function(e){
   scheduleRedraw();
 }, {passive:false});
 
+function inkAlphaAt(pt){
+  try{
+    var d=view.dpr, x=Math.round(pt.x*view.w*d)-3, y=Math.round(pt.y*view.h*d)-3;
+    var px=inkCtx.getImageData(Math.max(0,x), Math.max(0,y), 7, 7).data, n=0;
+    for(var i=3;i<px.length;i+=4) if(px[i]>0) n++;
+    return n;
+  }catch(err){ return "err:"+err.message; }
+}
+function checkInkLater(m, startRedraws){
+  var pts=m.pts, mid=pts[Math.floor(pts.length/2)], last=pts[pts.length-1];
+  requestAnimationFrame(function(){ requestAnimationFrame(function(){
+    var r=inkCv.getBoundingClientRect();
+    var top=document.elementFromPoint(r.left+mid.x*r.width, r.top+mid.y*r.height);
+    diag("app:ink-check", null, {
+      mid: inkAlphaAt(mid), end: inkAlphaAt(last), redraws: redrawCount-startRedraws,
+      canvas: inkCv.width+"x"+inkCv.height, css: Math.round(r.width)+"x"+Math.round(r.height),
+      top: top ? (top.id || top.tagName) : "none", lost: (inkCtx.isContextLost ? inkCtx.isContextLost() : "?")
+    });
+  }); });
+}
+
 function endStroke(e){
   if(drawing) diag("app:stroke-end", e, (e && e.type) + " pts=" + (drawing.pts ? drawing.pts.length : "-"));
+  if(drawing && drawing.pts && drawing.pts.length) checkInkLater(drawing, drawing.redraws0||0);
   if(e && e.pointerType==="pen"){ penDown=false; penUpAt=Date.now(); }
   var wasDrawing = !!(drawing && drawing.pts);
   drawing=null;
