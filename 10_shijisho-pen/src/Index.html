@@ -176,6 +176,7 @@
 
 <div id="bar">
   <button id="browse" class="solid">ファイル</button>
+  <button id="closeBtn" disabled title="保存せずに閉じて一覧へ戻る">閉じる</button>
 
   <div class="grp">
     <button id="prev" disabled>&lsaquo;</button>
@@ -496,6 +497,19 @@ var drawer=$("#drawer"), scrim=$("#scrim");
 function openDrawer(){ drawer.classList.add("show"); scrim.classList.add("show"); }
 function closeDrawer(){ drawer.classList.remove("show"); scrim.classList.remove("show"); }
 $("#browse").onclick = $("#browse2").onclick = openDrawer;
+
+/* 保存せずに閉じて、一覧に戻る。未保存の書き込みがあれば確かめる。
+   上書き済みのぶんは Drive に残っているので、消えるのは最後に保存して
+   からの書き込みだけ。 */
+function closeWithoutSaving(){
+  var back=function(){ clearPhotos(); closeFile(); refreshFiles(); openDrawer(); };
+  if(!dirty && !photos.length){ back(); return; }
+  var what = dirty ? "保存していない書き込み" : "";
+  if(photos.length) what += (what ? "と" : "") + "現品の写真 " + photos.length + " 枚";
+  ask(what + "があります。\n保存せずに閉じますか？\n(最後に保存してからの分は消えます)",
+      back, { yes:"保存せずに閉じる" });
+}
+$("#closeBtn").onclick = closeWithoutSaving;
 scrim.onclick = closeDrawer;
 
 var curFolder=null, searchT=null;
@@ -700,7 +714,7 @@ function mountPdf(res){
   }).then(function(doc){
     pdfDoc=doc; pageCount=doc.numPages;
     hint.hidden=true; sheet.hidden=false;
-    ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl","photo"].forEach(function(id){
+    ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl","photo","closeBtn"].forEach(function(id){
       $("#"+id).disabled=false;
     });
     return renderPage();
@@ -1449,7 +1463,7 @@ function closeFile(){
   curFile=null; pdfDoc=null; srcBytes=null;
   marks={}; pageNo=1; pageCount=0; zoom=1; setDirty(false);
   sheet.hidden=true; hint.hidden=false;
-  ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl","photo"].forEach(function(id){
+  ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl","photo","closeBtn"].forEach(function(id){
     $("#"+id).disabled=true;
   });
 }
