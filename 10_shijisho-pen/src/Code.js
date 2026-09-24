@@ -39,6 +39,45 @@ var MAX_HITS       = 200;  // 検索結果の最大件数
 var MAX_LIST_PAGES = 10;   // 1フォルダあたりの最大ページ数
 var MAX_DEPTH      = 10;   // パンくずをたどる最大段数
 
+// 上書き・別名で保存したファイルに付ける目印(Drive のファイルのプロパティ)。
+// チェック完了すると元ファイルはゴミ箱へ行くので、目印が付いていて
+// ゴミ箱に無いものが「途中まで書いてまだチェック完了していない」もの。
+// 振り分け(Sort.js)も、前から上書きしてあったコピーにこの目印を付ける。
+var SAVED_PROP    = 'shijishoPen';
+var SAVED_VALUE   = 'saved';
+var SAVED_AT_PROP = 'shijishoPenAt';
+
+function savedProps_(when) {
+  var p = {};
+  p[SAVED_PROP] = SAVED_VALUE;
+  p[SAVED_AT_PROP] = (when || new Date()).toISOString();
+  return p;
+}
+
+function isSaved_(f) {
+  return !!(f.properties && f.properties[SAVED_PROP] === SAVED_VALUE);
+}
+
+/** 一覧に返す1ファイルぶん。途中保存かどうかも付ける。 */
+function fileInfo_(f) {
+  return {
+    id: f.id,
+    name: f.name,
+    size: Number(f.size || 0),
+    modified: f.modifiedTime,
+    saved: isSaved_(f),
+    savedAt: isSaved_(f) ? (f.properties[SAVED_AT_PROP] || f.modifiedTime) : ''
+  };
+}
+
+var FILE_FIELDS = 'id,name,size,modifiedTime,mimeType,properties,parents';
+
+/** 途中保存(上書き済みでチェック未完了)のファイルを探す条件 */
+function savedQuery_() {
+  return "properties has { key='" + SAVED_PROP + "' and value='" + SAVED_VALUE + "' }" +
+         " and mimeType = '" + PDF_MIME + "' and trashed = false";
+}
+
 
 function doGet() {
   return HtmlService.createTemplateFromFile('Index')
@@ -114,7 +153,7 @@ function listFolder(folderId) {
       orderBy: 'folder,modifiedTime desc',
       pageSize: 200,
       pageToken: token || undefined,
-      fields: 'nextPageToken,files(id,name,size,modifiedTime,mimeType)',
+      fields: 'nextPageToken,files(' + FILE_FIELDS + ')',
       supportsAllDrives: true,
       includeItemsFromAllDrives: true
     });
@@ -123,12 +162,7 @@ function listFolder(folderId) {
       if (f.mimeType === FOLDER_MIME) {
         folders.push({ id: f.id, name: f.name });
       } else {
-        files.push({
-          id: f.id,
-          name: f.name,
-          size: Number(f.size || 0),
-          modified: f.modifiedTime
-        });
+        files.push(fileInfo_(f));
       }
     });
 
@@ -141,8 +175,65 @@ function listFolder(folderId) {
     isRoot: id === root,
     breadcrumb: breadcrumb_(meta, root),
     folders: folders,
-    files: files
+    files: files,
+    savedCount: countSaved_()
   };
+}
+
+/** 途中保存のファイルが全部で何件あるか。一覧の一番上に出す。 */
+function countSaved_() {
+  try {
+    var res = Drive.Files.list({
+      q: savedQuery_(),
+      pageSize: 200,
+      fields: 'files(id)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+      corpora: 'allDrives'
+    });
+    return (res.files || []).length;
+  } catch (e) {
+    return 0;          // 数えられなくても一覧は出す
+  }
+}
+
+/**
+ * 途中保存のファイルを全部返す。どのフォルダにあるかも付ける。
+ * 出荷日を過ぎて '004_要確認 へ移ったものも含む(見落としやすいので)。
+ */
+function listSavedPdfs() {
+  var out = [], token = null, pages = 0, folderName = {};
+
+  do {
+    var res = Drive.Files.list({
+      q: savedQuery_(),
+      orderBy: 'modifiedTime desc',
+      pageSize: 200,
+      pageToken: token || undefined,
+      fields: 'nextPageToken,files(' + FILE_FIELDS + ')',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+      corpora: 'allDrives'
+    });
+
+    (res.files || []).forEach(function (f) {
+      var info = fileInfo_(f);
+      var pid = (f.parents || [])[0];
+      if (pid) {
+        if (!(pid in folderName)) {
+          try {
+            folderName[pid] = Drive.Files.get(pid, { supportsAllDrives: true, fields: 'name' }).name;
+          } catch (e) { folderName[pid] = ''; }
+        }
+        info.folder = folderName[pid];
+      }
+      out.push(info);
+    });
+
+    token = res.nextPageToken;
+  } while (token && ++pages < MAX_LIST_PAGES);
+
+  return out;
 }
 
 /** ルートフォルダまで親をたどる。ルート外にいる場合は現在地だけ返す。 */
@@ -195,7 +286,7 @@ function searchPdfs(keyword) {
          " and name contains '" + q_(keyword) + "'",
       orderBy: 'modifiedTime desc',
       pageSize: 100,
-      fields: 'files(id,name,size,modifiedTime)',
+      fields: 'files(' + FILE_FIELDS + ')',
       supportsAllDrives: true,
       includeItemsFromAllDrives: true
     });
@@ -203,12 +294,7 @@ function searchPdfs(keyword) {
     (res.files || []).forEach(function (f) {
       if (seen[f.id]) return;
       seen[f.id] = true;
-      out.push({
-        id: f.id,
-        name: f.name,
-        size: Number(f.size || 0),
-        modified: f.modifiedTime
-      });
+      out.push(fileInfo_(f));
     });
   }
 
@@ -285,7 +371,8 @@ function savePdf(req) {
     var blob = Utilities.newBlob(bytes, PDF_MIME, original.name);
 
     if (req.mode === 'overwrite') {
-      var updated = Drive.Files.update({}, req.fileId, blob, { supportsAllDrives: true });
+      var updated = Drive.Files.update({ properties: savedProps_() }, req.fileId, blob,
+                                       { supportsAllDrives: true });
       return {
         id: updated.id,
         name: original.name,
@@ -302,7 +389,7 @@ function savePdf(req) {
     blob.setName(newName);
 
     var created = Drive.Files.create(
-      { name: newName, parents: original.parents },
+      { name: newName, parents: original.parents, properties: savedProps_() },
       blob,
       { supportsAllDrives: true }
     );

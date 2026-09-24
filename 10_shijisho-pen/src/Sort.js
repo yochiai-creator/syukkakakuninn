@@ -97,6 +97,7 @@ function runSort() {
     var r = sortMonths_(targetMonths_(), 100000);  // 打ち切りは時間の方で効かせる
 
     put_(r, '名前を直した', step_(renameCopiesFromMaster_));
+    put_(r, '途中保存の目印を付けた', step_(markSavedCopies_));
     if (SORT_MOVE_OVERDUE) put_(r, '要確認へ移した', step_(moveOverdueCopies_));
     put_(r, '表に足した得意先', step_(function () { return appendUnknownCustomers_(r.未登録); }));
 
@@ -249,6 +250,9 @@ function finishResult_(result) {
     ? '残り ' + result.残り + ' 件。2分後に続きを自動で回します。'
     : '対象の月は全部終わりました。');
 
+  if (result.途中保存の目印を付けた > 0) {
+    memo.push('前から上書きしてあった ' + result.途中保存の目印を付けた + ' 件に、途中保存の目印を付けました。');
+  }
   if (result.名前を直した > 0) {
     memo.push('マスタに合わせてコピーの名前を ' + result.名前を直した + ' 件直しました。');
   }
@@ -891,6 +895,79 @@ function renameCopiesFromMaster_() {
   });
 
   return { 件数: renamed.length, 一覧: renamed };
+}
+
+/**
+ * アプリで上書きしたのに目印が付いていないコピーに、途中保存の目印を付ける。
+ * (目印は上書き保存のときに付けるが、その仕組みより前に上書きしたものには無い)
+ *
+ * 振り分けのコピーは元の指図書とまったく同じ中身なので、Drive が持っている
+ * 中身の指紋(md5)が元と同じはず。違っていればアプリで上書きしたもの。
+ * ダウンロードはせず、一覧の情報だけで判定する。
+ */
+function markSavedCopies_() {
+  var folders = [];
+  var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
+  Object.keys(index).forEach(function (kg) { folders.push(index[kg]); });
+  folders.push({ id: OVERDUE_FOLDER_ID, path: '要確認' });
+
+  // 目印の無いコピーを集める
+  var todo = [];
+  folders.forEach(function (fo) {
+    listPdfMeta_(fo.id).forEach(function (f) {
+      if (isSaved_(f)) return;
+      var m = f.name.match(/^((\d{2})\.(\d{2})\.\d{2}_[^_]+)_/);   // 26.09.25_26-60749-0(1)
+      if (!m) return;
+      todo.push({ f: f, path: fo.path, key: m[1], y: Number('20' + m[2]), mo: Number(m[3]) });
+    });
+  });
+  if (!todo.length) return { 件数: 0, 一覧: [] };
+
+  // 元の指図書の指紋。出荷日の月と前後の月のフォルダを見る
+  var srcMd5 = {}, seenMonth = {};
+  todo.forEach(function (t) {
+    [-1, 0, 1].forEach(function (d) {
+      var dt = new Date(t.y, t.mo - 1 + d, 1);
+      var ym = dt.getFullYear() + '年/' + (dt.getMonth() + 1) + '月';
+      if (seenMonth[ym]) return;
+      seenMonth[ym] = true;
+
+      var yid = findChildFolder_(SRC_ROOT_ID, dt.getFullYear() + '年');
+      var mid = yid && findChildFolder_(yid, (dt.getMonth() + 1) + '月');
+      if (!mid) return;
+      listPdfMeta_(mid).forEach(function (f) { srcMd5[f.name] = f.md5Checksum; });
+    });
+  });
+
+  var marked = [];
+  todo.forEach(function (t) {
+    var src = srcMd5['出荷作業指図書_' + t.key + '.pdf'];
+    if (!src || !t.f.md5Checksum || src === t.f.md5Checksum) return;   // 元が無い・同じなら触らない
+
+    Drive.Files.update({ properties: savedProps_(new Date(t.f.modifiedTime)) }, t.f.id, null,
+                       { supportsAllDrives: true });
+    marked.push(t.path + '/' + t.f.name);
+  });
+
+  return { 件数: marked.length, 一覧: marked };
+}
+
+/** フォルダ直下の PDF の名前・指紋・目印 */
+function listPdfMeta_(folderId) {
+  var out = [], token = null;
+  do {
+    var res = Drive.Files.list({
+      q: "'" + folderId + "' in parents and mimeType = 'application/pdf' and trashed = false",
+      pageSize: 1000,
+      pageToken: token || undefined,
+      fields: 'nextPageToken,files(id,name,md5Checksum,modifiedTime,properties)',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true
+    });
+    out = out.concat(res.files || []);
+    token = res.nextPageToken;
+  } while (token);
+  return out;
 }
 
 /** 移す先の要確認フォルダを返す。 */
