@@ -753,7 +753,7 @@ function packMarks(){
   Object.keys(marks).forEach(function(k){
     var list=(marks[k]||[]).map(function(m){
       var c={};
-      Object.keys(m).forEach(function(key){ if(key!=="drawn") c[key]=m[key]; });
+      Object.keys(m).forEach(function(key){ if(key!=="drawn" && key!=="mismatch") c[key]=m[key]; });
       if(c.pts) c.pts=c.pts.map(function(p){ return {x:r5(p.x), y:r5(p.y), p:Math.round(p.p*1000)/1000}; });
       if(typeof c.x==="number"){ c.x=r5(c.x); c.y=r5(c.y); }
       return c;
@@ -1199,6 +1199,19 @@ inkCv.addEventListener("pointermove", function(e){
   e.preventDefault();
   var evts = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
   if(!evts.length) evts = [e];   // まとめ取りに対応していない/空で返す環境
+  // まとめて渡された点の位置が、このイベント自身の位置と食い違うことがある
+  // (iPad の Chrome で、速く書いた線が見えない場所に描かれていた疑い)。
+  // 最後の点はこのイベントと同じ位置のはずなので、ずれていたら使わない。
+  var lastC = evts[evts.length-1];
+  if(evts.length > 1 || lastC !== e){
+    if(!isFinite(lastC.clientX) || !isFinite(lastC.clientY) ||
+       Math.abs(lastC.clientX - e.clientX) > 2 || Math.abs(lastC.clientY - e.clientY) > 2){
+      if(!drawing.mismatch) diag("app:coalesced-mismatch", e,
+        {n: evts.length, cx: Math.round(lastC.clientX), cy: Math.round(lastC.clientY)});
+      drawing.mismatch = (drawing.mismatch||0) + 1;
+      evts = [e];
+    }
+  }
   if(drawing.erase){
     var hit=false;
     for(var i=0;i<evts.length;i++) if(hitErase(pos(evts[i]))) hit=true;
@@ -1207,6 +1220,7 @@ inkCv.addEventListener("pointermove", function(e){
   }
   for(var k=0;k<evts.length;k++){
     var p=pos(evts[k]);
+    if(!isFinite(p.x) || !isFinite(p.y)) continue;
     var last=drawing.pts[drawing.pts.length-1];
     drawing.pts.push({x:p.x, y:p.y, p:pressure(evts[k], last.p)});
   }
@@ -1234,8 +1248,21 @@ function checkInkLater(m, startRedraws){
   }); });
 }
 
+function strokeStats(m){
+  var P=m.pts, x0=1e9,y0=1e9,x1=-1e9,y1=-1e9, out=0, jump=0;
+  for(var i=0;i<P.length;i++){
+    var q=P[i];
+    if(q.x<0||q.x>1||q.y<0||q.y>1) out++;
+    x0=Math.min(x0,q.x); x1=Math.max(x1,q.x); y0=Math.min(y0,q.y); y1=Math.max(y1,q.y);
+    if(i){ var dx=(q.x-P[i-1].x)*view.w, dy=(q.y-P[i-1].y)*view.h; jump=Math.max(jump, Math.sqrt(dx*dx+dy*dy)); }
+  }
+  var f=function(v){ return Math.round(v*1000)/1000; };
+  return {n:P.length, out:out, maxJumpPx:Math.round(jump), box:[f(x0),f(y0),f(x1),f(y1)], mismatch:m.mismatch||0};
+}
+
 function endStroke(e){
   if(drawing) diag("app:stroke-end", e, (e && e.type) + " pts=" + (drawing.pts ? drawing.pts.length : "-"));
+  if(drawing && drawing.pts && drawing.pts.length) diag("app:stroke-stats", null, strokeStats(drawing));
   if(drawing && drawing.pts && drawing.pts.length) checkInkLater(drawing, drawing.redraws0||0);
   if(e && e.pointerType==="pen"){ penDown=false; penUpAt=Date.now(); }
   var wasDrawing = !!(drawing && drawing.pts);
