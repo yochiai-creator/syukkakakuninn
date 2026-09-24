@@ -607,7 +607,18 @@ function mountPdf(res){
 
   var restored=false;
   pdfjsLib.getDocument({data: srcBytes.slice()}).promise.then(function(doc){
-    return restoreEditable(doc).then(function(r){ restored=r.restored; return r.doc; });
+    // 棚から来たときは、書き込む前のPDFと書き込みの一覧が届いている
+    if(res.marks){
+      baseSource="shelf";
+      if(!res.pages || res.pages===doc.numPages){ marks=res.marks; restored=true; }
+      return doc;
+    }
+    // 以前の方式(PDFの中に入っている)なら、そこから戻す
+    return restoreEditable(doc).then(function(r){
+      restored=r.restored;
+      baseSource = r.restored ? "embedded" : "file";
+      return r.doc;
+    });
   }).then(function(doc){
     pdfDoc=doc; pageCount=doc.numPages;
     hint.hidden=true; sheet.hidden=false;
@@ -629,12 +640,18 @@ function mountPdf(res){
 /* ---------- 書き込みを後から直せるようにする ----------
    保存したPDFでは書き込みが画像として焼き込まれるので、開き直すと
    1本ずつ消したり直したりできない。そこで上書き・別名で保存するとき、
-   「書き込む前のPDF」と「書き込みの一覧」を添付ファイルとして入れておく。
-   開いたときにこの2つがあれば、書き込む前のPDFを表示して、書き込みを
-   元の線やレ点・ハンコとして戻す。
+   「書き込む前のPDF」と「書き込みの一覧」を Drive の棚
+   ('001_【出荷】/書き込みデータ（アプリ用）)に置く。開くときにサーバーが
+   棚を見て、あれば書き込む前のPDFと一覧を返してくる。
 
-   チェック完了のときは入れない(仕上がりのPDFなので)。
-   添付の無いPDF(この仕組みより前に保存したもの)は今までどおり開く。 */
+   書き込む前のPDFがどこから来たかを baseSource に持つ。
+     file     開いたファイルそのもの(まだ棚に無い)
+     shelf    棚から来た
+     embedded 以前の方式で PDF の中に添付してあった。この場合だけ、
+              保存するときに書き込む前のPDFをサーバーへ送る(棚へ移す)
+   以前の方式の添付は読むだけで、もう入れない。 */
+var baseSource="file";
+
 var EDIT_BASE_NAME  = "shijisho-pen-base.pdf";
 var EDIT_MARKS_NAME = "shijisho-pen-marks.json";
 var EDIT_VERSION = 1;
@@ -677,20 +694,6 @@ function packMarks(){
     if(list.length) out[k]=list;
   });
   return out;
-}
-
-function attachEditable(out){
-  var json = JSON.stringify({v:EDIT_VERSION, pages:pageCount, marks:packMarks()});
-  var now = new Date();
-  return out.attach(srcBytes.slice(), EDIT_BASE_NAME, {
-    mimeType:"application/pdf", description:"書き込む前のPDF(指図書 書き込み用)",
-    creationDate:now, modificationDate:now
-  }).then(function(){
-    return out.attach(new TextEncoder().encode(json), EDIT_MARKS_NAME, {
-      mimeType:"application/json", description:"書き込みの一覧(指図書 書き込み用)",
-      creationDate:now, modificationDate:now
-    });
-  });
 }
 
 /* ---------- render ---------- */
@@ -1224,15 +1227,27 @@ function save(mode){
   btns.forEach(function(b){ b.disabled=true; });
   label.textContent="保存中…";
 
-  buildPdf(mode==="done", mode!=="done").then(function(bytes){
-    return new Promise(function(resolve, reject){
-      google.script.run
-        .withSuccessHandler(resolve)
-        .withFailureHandler(reject)
-        .savePdf({fileId: curFile.id, data: bytesToB64(bytes), mode: mode});
+  buildPdf(mode==="done").then(function(bytes){
+    var req={fileId: curFile.id, data: bytesToB64(bytes), mode: mode};
+    if(mode!=="done"){
+      req.marks = JSON.stringify({pages: pageCount, marks: packMarks()});
+      req.baseSource = baseSource;
+      if(baseSource==="embedded") req.base = bytesToB64(srcBytes);
+    }
+    var send=function(r){
+      return new Promise(function(resolve, reject){
+        google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).savePdf(r);
+      });
+    };
+    return send(req).catch(function(err){
+      // 棚にあるはずの書き込み前のPDFが無かった。手元のものを送り直す
+      if(String(err && err.message || err).indexOf("NEED_BASE") < 0) throw err;
+      req.base = bytesToB64(srcBytes);
+      return send(req);
     });
   }).then(function(res){
     setDirty(false);
+    if(res.mode==="overwrite") baseSource="shelf";   // もう棚にある
     if(res.mode==="done"){
       toast("チェック完了 " + res.folder + " へ保存、元ファイルはゴミ箱へ");
       clearPhotos();
@@ -1260,7 +1275,7 @@ function closeFile(){
   });
 }
 
-function buildPdf(withPhotos, editable){
+function buildPdf(withPhotos){
   var PDFDocument = PDFLib.PDFDocument;
   // ハンコの字がフォント未読込のまま焼き込まれないように待つ
   var fontReady = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
@@ -1293,7 +1308,6 @@ function buildPdf(withPhotos, editable){
 
     return chain
       .then(function(){ return withPhotos ? appendPhotos(out) : null; })
-      .then(function(){ return editable ? attachEditable(out) : null; })
       .then(function(){ return out.save(); });
   });
 }
