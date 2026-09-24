@@ -87,6 +87,18 @@ function doGet() {
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
+/**
+ * アプリの「書きにくいときの記録を送る」から呼ばれる。
+ * 棚('001_【出荷】/書き込みデータ（アプリ用）)の下の「ログ」に置く。
+ */
+function saveDiagLog(text) {
+  var folder = DriveApp.getFolderById(childFolder_(shelfFolder_(), 'ログ'));
+  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
+  var name = 'pen-log_' + Utilities.formatDate(new Date(), tz, 'yyyyMMdd_HHmmss') + '.txt';
+  folder.createFile(name, String(text || '').slice(0, 2 * 1024 * 1024), 'text/plain');
+  return name;
+}
+
 function include(name) {
   return HtmlService.createHtmlOutputFromFile(name).getContent();
 }

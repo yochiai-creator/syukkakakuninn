@@ -142,6 +142,9 @@
   .row .tag{display:inline-block; margin-right:6px; padding:1px 7px; border-radius:9px;
             background:#e08a00; color:#fff; font-size:11px; font-weight:600; vertical-align:1px;}
   .row.savedSum{background:#fdebc8; font-weight:600;}
+  #drawerBot{display:flex; gap:8px; flex-wrap:wrap; align-items:center;}
+  #drawerBot .diag{margin-left:auto; font-size:12px; min-height:32px; padding:4px 10px;
+                   background:transparent; border:1px dashed #9a9ca3; color:#5c5f66;}
   .row.savedSum b{color:#8a4b00;}
   #drawerBot{padding:12px 16px; border-top:1px solid var(--line);
              padding-bottom:max(12px, env(safe-area-inset-bottom));}
@@ -219,6 +222,7 @@
   <div id="files"><p class="msg">読み込み中…</p></div>
   <div id="drawerBot">
     <button id="goUp" disabled>&lsaquo; ひとつ上へ</button>
+    <button id="sendDiag" class="diag">書きにくいときの記録を送る</button>
   </div>
 </aside>
 
@@ -293,6 +297,49 @@ if(document.fonts && document.fonts.load){
   }).catch(function(){});
 }
 var penSeen=false, drawing=null;
+
+/* ---------- 書きにくいときの記録 ----------
+   タブレットがペンの入力をどう伝えてきて、アプリがそれをどう扱ったかを
+   直近のぶんだけ手元に残す。「記録を送る」を押すと Drive に置く。
+   こちらの試験環境では起きない不具合を、実機の記録で確かめるためのもの。 */
+var diagBuf=[], DIAG_MAX=2000, diagT0=Date.now(), diagMoves={};
+function diag(tag, e, extra){
+  var r={t:Date.now()-diagT0, tag:tag};
+  if(e){
+    r.pt=e.pointerType; r.id=e.pointerId;
+    if(e.clientX!=null){ r.x=Math.round(e.clientX); r.y=Math.round(e.clientY); }
+    if(e.pressure!=null) r.pr=Math.round(e.pressure*100)/100;
+    if(e.width!=null){ r.w=Math.round(e.width); r.h=Math.round(e.height); }
+    if(e.buttons!=null) r.b=e.buttons;
+    if(e.target && e.target.id) r.on=e.target.id;
+  }
+  if(extra) r.x2=extra;
+  diagBuf.push(r);
+  if(diagBuf.length>DIAG_MAX) diagBuf.splice(0, diagBuf.length-DIAG_MAX);
+}
+// 画面全体で、届いたままの入力を記録する(動きは間引く)
+["pointerdown","pointerup","pointercancel","pointerleave","lostpointercapture"].forEach(function(type){
+  window.addEventListener(type, function(e){ diag("raw:"+type, e); }, true);
+});
+window.addEventListener("pointermove", function(e){
+  var k=e.pointerId, n=(diagMoves[k]=(diagMoves[k]||0)+1);
+  if(n<=3 || n%15===0) diag("raw:move#"+n, e);
+}, true);
+window.addEventListener("pointerdown", function(e){ diagMoves[e.pointerId]=0; }, true);
+window.addEventListener("error", function(ev){ diag("error", null, String(ev.message)+" @"+ev.lineno); });
+
+function diagText(){
+  var head={
+    ua:navigator.userAgent, dpr:window.devicePixelRatio, touchPoints:navigator.maxTouchPoints,
+    screen:screen.width+"x"+screen.height, win:innerWidth+"x"+innerHeight,
+    view:{w:Math.round(view.w), h:Math.round(view.h), dpr:view.dpr}, zoom:zoom,
+    coalesced: !!(window.PointerEvent && PointerEvent.prototype.getCoalescedEvents),
+    file: curFile ? curFile.name : "", page: pageNo, tool: tool, penSeen: penSeen,
+    marks: (marks[pageNo]||[]).length, sentAt: new Date().toString()
+  };
+  return JSON.stringify(head, null, 1) + "\n----\n" +
+    diagBuf.map(function(r){ return JSON.stringify(r); }).join("\n");
+}
 
 /* ペンが紙に触れている間と、離してすぐの間は true。
    このあいだに来た指の接触は手のひらとみなし、拡大縮小に使わない。 */
@@ -388,6 +435,13 @@ $("#clear").onclick = function(){
   ask("このページの書き込みをすべて消しますか?", function(){
     marks[pageNo]=[]; setDirty(true); redraw();
   });
+};
+$("#sendDiag").onclick = function(){
+  var btn=$("#sendDiag"); btn.disabled=true; btn.textContent="送信中…";
+  google.script.run
+    .withSuccessHandler(function(name){ toast("記録を送りました: "+name); btn.textContent="記録を送りました"; })
+    .withFailureHandler(function(err){ toast("送れませんでした: "+err.message); btn.disabled=false; btn.textContent="書きにくいときの記録を送る"; })
+    .saveDiagLog(diagText());
 };
 $("#saveOver").onclick = function(){ save("overwrite"); };
 $("#saveCopy").onclick = function(){ save("copy"); };
@@ -776,6 +830,7 @@ var PINCH_START_RATIO=0.08, PINCH_START_PX=20;
    見えてしまい、2画目以降が書けなかった。ペンが触れた時点でピンチは
    取りやめ、そのとき画面に触れている指はすべて手のひらとして無視する。 */
 function yieldToPen(){
+  diag("app:yield-to-pen", null, {pinch: !!pinch, touches: Object.keys(touches).length});
   if(pinch){
     var live=pinch.live;
     pinch=null;
@@ -796,8 +851,9 @@ function touchIds(){ return Object.keys(touches).slice(0,2); }
 stage.addEventListener("pointerdown", function(e){
   if(e.pointerType!=="touch" || !pdfDoc) return;
   // ペンで書いている最中に触れたものは手のひら。数に入れない。
-  if(penBusy()) return;
+  if(penBusy()){ diag("app:palm-ignored", e); return; }
   touches[e.pointerId]={x:e.clientX, y:e.clientY};
+  diag("app:touch-count", e, Object.keys(touches).length);
 
   var ids=touchIds();
   if(ids.length===1){
@@ -809,6 +865,7 @@ stage.addEventListener("pointerdown", function(e){
     var r=stage.getBoundingClientRect();
 
     // つまみ始めに指の下にあった紙の上の点。これを指に追従させる。
+    diag("app:pinch-start", e);
     pinch={
       d:  tdist(a,b)||1,
       z:  zoom,
@@ -861,6 +918,7 @@ stage.addEventListener("pointermove", function(e){
                 tdist({x:mx,y:my}, {x:pinch.mx,y:pinch.my}) > PINCH_START_PX;
     if(!moved) return;
     pinch.live = true;
+    diag("app:pinch-live", e);
     sheet.style.transformOrigin="0 0";
     sheet.style.willChange="transform";
   }
@@ -885,6 +943,7 @@ stage.addEventListener("pointermove", function(e){
 function commitPinch(){
   var p=pinch; pinch=null;
   if(!p) return;
+  diag("app:pinch-end", null, p.live ? "live" : "not-live");
   if(!p.live){ return; }          // 動かさずに離した(手のひら)。何もしない
 
   // 基準は最後の「2本の中点」。ここで残った指の位置を使うと、
@@ -1083,8 +1142,9 @@ function hitErase(pt){
 inkCv.addEventListener("pointerdown", function(e){
   if(!pdfDoc) return;
   if(e.pointerType==="pen"){ penSeen=true; penDown=true; yieldToPen(); }
-  if(penSeen && e.pointerType!=="pen") return;   // 手のひら・指は無視
-  if(pinch) return;                               // 指でつまんでいる最中は指で書かない
+  if(penSeen && e.pointerType!=="pen"){ diag("app:reject-not-pen", e); return; }   // 手のひら・指は無視
+  if(pinch){ diag("app:reject-pinch", e); return; }  // 指でつまんでいる最中は指で書かない
+  diag("app:ink-down", e, tool);
   if(e.pointerType==="mouse" && e.button!==0) return;
 
   e.preventDefault();
@@ -1137,6 +1197,7 @@ inkCv.addEventListener("pointermove", function(e){
 }, {passive:false});
 
 function endStroke(e){
+  if(drawing) diag("app:stroke-end", e, (e && e.type) + " pts=" + (drawing.pts ? drawing.pts.length : "-"));
   if(e && e.pointerType==="pen"){ penDown=false; penUpAt=Date.now(); }
   if(drawing && drawing.pts){ delete drawing.drawn; }
   drawing=null;
