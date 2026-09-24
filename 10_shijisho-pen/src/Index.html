@@ -287,6 +287,24 @@ if(document.fonts && document.fonts.load){
 }
 var penSeen=false, drawing=null;
 
+/* ペンが紙に触れている間と、離してすぐの間は true。
+   このあいだに来た指の接触は手のひらとみなし、拡大縮小に使わない。 */
+var penDown=false, penUpAt=0, PALM_GRACE_MS=700;
+function penBusy(){ return penDown || (Date.now()-penUpAt) < PALM_GRACE_MS; }
+
+/* キャンバスの画素数に上限を設ける。
+   iPad の Safari は1枚あたり約1,670万画素までしか扱えず、超えると
+   描画が極端に遅くなるか、何も出なくなる。拡大すると
+   (紙の幅×倍率×画素密度)² で増えるので、3倍でもう超える。
+   上限を超えるときは画素密度の方を下げる。見た目は少し甘くなるが、
+   ペンの追従を優先する。 */
+var MAX_CANVAS_PIXELS = 12000000;
+function canvasDpr(w, h){
+  var dpr=Math.min(window.devicePixelRatio||1, 3);
+  var cap=Math.sqrt(MAX_CANVAS_PIXELS/(w*h));
+  return Math.max(0.5, Math.min(dpr, cap));
+}
+
 /* ---------- toast ---------- */
 var toastT;
 function toast(msg){
@@ -560,7 +578,7 @@ function renderPage(){
     var availW=stage.clientWidth-28, availH=stage.clientHeight-28;
     fitScale=Math.min(availW/un.width, availH/un.height);
     var vp=page.getViewport({scale: fitScale*zoom});
-    var dpr=Math.min(window.devicePixelRatio||1, 3);
+    var dpr=canvasDpr(vp.width, vp.height);
     view={w:vp.width, h:vp.height, dpr:dpr};
 
     sheet.style.width=vp.width+"px";
@@ -637,6 +655,8 @@ function touchIds(){ return Object.keys(touches).slice(0,2); }
 
 stage.addEventListener("pointerdown", function(e){
   if(e.pointerType!=="touch" || !pdfDoc) return;
+  // ペンで書いている最中に触れたものは手のひら。数に入れない。
+  if(penBusy()) return;
   touches[e.pointerId]={x:e.clientX, y:e.clientY};
 
   var ids=touchIds();
@@ -662,19 +682,27 @@ stage.addEventListener("pointerdown", function(e){
     sheet.style.transformOrigin="0 0";
     sheet.style.willChange="transform";
 
-    // つまもうとしただけなので、1本目の指が触れて以降の書き込みを
+    // つまもうとしただけなので、1本目の指が触れて以降に指で書いたものを
     // すべて取り消す。直前の1本だけ消すと、1本目が引いた線が残る。
-    drawing=null;
+    // ペンで書いたものは消さない(手のひらでここに来ることがあるため)。
+    if(drawing && drawing.by==="touch") drawing=null;
     if(fingerStart){
       var list=marks[fingerStart.page];
       if(list && list.length > fingerStart.len){
-        list.length = fingerStart.len;
-        setDirty(fingerStart.dirty);
-        if(fingerStart.page===pageNo) redraw();
+        var kept=list.filter(function(m, i){ return i < fingerStart.len || m.by!=="touch"; });
+        if(kept.length !== list.length){
+          marks[fingerStart.page]=kept;
+          if(kept.length === fingerStart.len) setDirty(fingerStart.dirty);
+          if(fingerStart.page===pageNo) redraw();
+        }
       }
     }
   }
-}, {passive:false});
+}, {passive:false, capture:true});
+/* capture にして、紙の上の処理(線を足す)より先にここを通す。
+   後だと、1本目の指が引き始めた線がもう数に入ってしまい、
+   ピンチと分かっても取り消せない。2本目の指も、先に pinch が
+   立つので線を引き始めない。 */
 
 stage.addEventListener("pointermove", function(e){
   if(e.pointerType!=="touch" || !(e.pointerId in touches)) return;
@@ -766,7 +794,16 @@ function paint(ctx, m, W, H, s){
     ctx.fill();
     return;
   }
-  for(var i=1;i<p.length;i++){
+  paintSegments(ctx, m, W, H, unit, 1);
+}
+
+/* 線の from 番目の点から最後までを描く。書いている最中は、
+   増えたぶんだけをここで描き足す(毎回ページ全体を描き直すと、
+   線や判子が増えるほど遅れてペン先に付いてこなくなる)。 */
+function paintSegments(ctx, m, W, H, unit, from){
+  var p=m.pts;
+  ctx.lineCap="round"; ctx.lineJoin="round"; ctx.strokeStyle=m.color;
+  for(var i=Math.max(1, from);i<p.length;i++){
     var a=p[i-1], b=p[i];
     ctx.lineWidth=Math.max(.5, unit*(a.p+b.p)/2);
     ctx.beginPath();
@@ -774,6 +811,20 @@ function paint(ctx, m, W, H, s){
     ctx.lineTo(b.x*W, b.y*H);
     ctx.stroke();
   }
+}
+
+/* 書いている線の、まだ描いていないぶんだけを描く */
+function paintTail(m){
+  inkCtx.setTransform(view.dpr,0,0,view.dpr,0,0);
+  var unit = m.rel ? m.rel*view.w : m.size;
+  paintSegments(inkCtx, m, view.w, view.h, unit, m.drawn||1);
+  m.drawn = m.pts.length;
+}
+
+function updateInkButtons(){
+  var list=marks[pageNo]||[];
+  $("#undo").disabled = !list.length;
+  $("#clear").disabled = !list.length;
 }
 
 /* 日付印。丸を横線で二つに分け、上に名前、下にチェックした日を入れる。
@@ -835,8 +886,8 @@ function redraw(){
   inkCtx.clearRect(0,0,view.w,view.h);
   var list=marks[pageNo]||[];
   for(var i=0;i<list.length;i++) paint(inkCtx, list[i], view.w, view.h, 1);
-  $("#undo").disabled = !list.length;
-  $("#clear").disabled = !list.length;
+  if(drawing && drawing.pts) drawing.drawn = drawing.pts.length;
+  updateInkButtons();
 }
 
 function pos(e){
@@ -855,9 +906,16 @@ function sizeRel(){
   return size / base;
 }
 
-function pressure(e){
+/* 筆圧で太さを少しだけ変える。
+   以前は 0.45〜1.35 倍と幅が広く、軽く書くと細くかすれ、
+   力の入り方で太さがばらついて書きにくかった。0.8〜1.2 倍に絞る。
+   値は前の点となじませて、急に太さが跳ねないようにする。 */
+var PRESSURE_MIN=0.8, PRESSURE_RANGE=0.4, PRESSURE_SMOOTH=0.35;
+function pressure(e, prev){
   if(e.pointerType!=="pen") return 1;
-  return 0.45 + Math.min(1, e.pressure||0.5)*0.9;
+  var raw = e.pressure>0 ? Math.min(1, e.pressure) : 0.5;
+  var w = PRESSURE_MIN + raw*PRESSURE_RANGE;
+  return prev ? prev + (w-prev)*PRESSURE_SMOOTH : w;
 }
 function hitErase(pt){
   var list=marks[pageNo]||[], R=0.016*Math.max(view.w, view.h);
@@ -874,8 +932,9 @@ function hitErase(pt){
 
 inkCv.addEventListener("pointerdown", function(e){
   if(!pdfDoc) return;
-  if(e.pointerType==="pen") penSeen=true;
+  if(e.pointerType==="pen"){ penSeen=true; penDown=true; }
   if(penSeen && e.pointerType!=="pen") return;   // 手のひら・指は無視
+  if(pinch) return;                               // 拡大縮小の最中は書かない
   if(e.pointerType==="mouse" && e.button!==0) return;
 
   e.preventDefault();
@@ -884,28 +943,35 @@ inkCv.addEventListener("pointerdown", function(e){
   marks[pageNo]=marks[pageNo]||[];
 
   if(tool==="stamp"){
-    marks[pageNo].push({type:"stamp", name:stampName, date:stampDate(), x:pt.x, y:pt.y});
+    marks[pageNo].push({type:"stamp", name:stampName, date:stampDate(), x:pt.x, y:pt.y, by:e.pointerType});
     setDirty(true); redraw(); return;
   }
   if(tool==="check"){
-    marks[pageNo].push({type:"check", color:color, size:size, rel:sizeRel(), x:pt.x, y:pt.y});
+    marks[pageNo].push({type:"check", color:color, size:size, rel:sizeRel(), x:pt.x, y:pt.y, by:e.pointerType});
     setDirty(true); redraw(); return;
   }
   if(tool==="erase"){
-    drawing={erase:true};
+    drawing={erase:true, by:e.pointerType};
     if(hitErase(pt)){ setDirty(true); redraw(); }
     return;
   }
-  drawing={type:"stroke", color:color, size:size, rel:sizeRel(),
+  drawing={type:"stroke", color:color, size:size, rel:sizeRel(), by:e.pointerType,
            pts:[{x:pt.x, y:pt.y, p:pressure(e)}]};
   marks[pageNo].push(drawing);
-  setDirty(true); redraw();
+  setDirty(true);
+
+  // 書き始めの点だけ描く。ページ全体は描き直さない
+  inkCtx.setTransform(view.dpr,0,0,view.dpr,0,0);
+  paint(inkCtx, drawing, view.w, view.h, 1);
+  drawing.drawn = 1;
+  updateInkButtons();
 }, {passive:false});
 
 inkCv.addEventListener("pointermove", function(e){
   if(!drawing) return;
   e.preventDefault();
-  var evts = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  var evts = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+  if(!evts.length) evts = [e];   // まとめ取りに対応していない/空で返す環境
   if(drawing.erase){
     var hit=false;
     for(var i=0;i<evts.length;i++) if(hitErase(pos(evts[i]))) hit=true;
@@ -914,12 +980,17 @@ inkCv.addEventListener("pointermove", function(e){
   }
   for(var k=0;k<evts.length;k++){
     var p=pos(evts[k]);
-    drawing.pts.push({x:p.x, y:p.y, p:pressure(evts[k])});
+    var last=drawing.pts[drawing.pts.length-1];
+    drawing.pts.push({x:p.x, y:p.y, p:pressure(evts[k], last.p)});
   }
-  redraw();
+  paintTail(drawing);
 }, {passive:false});
 
-function endStroke(){ drawing=null; }
+function endStroke(e){
+  if(e && e.pointerType==="pen"){ penDown=false; penUpAt=Date.now(); }
+  if(drawing && drawing.pts){ delete drawing.drawn; }
+  drawing=null;
+}
 inkCv.addEventListener("pointerup", endStroke);
 inkCv.addEventListener("pointercancel", endStroke);
 inkCv.addEventListener("pointerleave", endStroke);
