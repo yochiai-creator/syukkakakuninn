@@ -102,6 +102,8 @@
   #sheet canvas{position:absolute; inset:0; display:block; width:100%; height:100%;}
   #pdfLayer{position:relative !important;}
   #inkLayer{touch-action:none;}
+  /* 紙の上では iPad の標準の動き(ダブルタップの拡大など)をさせない */
+  html, #stage, #sheet, #sheet canvas{touch-action:none;}
 
   #hint{position:absolute; inset:0; display:grid; place-items:center; padding:24px; text-align:center;}
   #hint div{max-width:26em; line-height:1.7;}
@@ -318,6 +320,15 @@ function diag(tag, e, extra){
   if(diagBuf.length>DIAG_MAX) diagBuf.splice(0, diagBuf.length-DIAG_MAX);
 }
 // 画面全体で、届いたままの入力を記録する(動きは間引く)
+// iPad からタッチそのものが届いたか(ペンでもタッチは出る)。
+// ポインタの記録が無いのにこれがあれば、ブラウザが途中で捨てている。
+["touchstart","touchend","touchcancel"].forEach(function(type){
+  window.addEventListener(type, function(e){
+    var t=e.changedTouches && e.changedTouches[0];
+    diag("raw:"+type, null, t ? {kind:t.touchType||"", x:Math.round(t.clientX), y:Math.round(t.clientY),
+      n:e.touches.length, on:(e.target && e.target.id)||"", cancelable:e.cancelable} : null);
+  }, {capture:true, passive:true});
+});
 ["pointerdown","pointerup","pointercancel","pointerleave","lostpointercapture"].forEach(function(type){
   window.addEventListener(type, function(e){ diag("raw:"+type, e); }, true);
 });
@@ -987,6 +998,21 @@ function endTouch(e){
   if(pinch && Object.keys(touches).length<2) commitPinch();
   if(!Object.keys(touches).length) fingerStart=null;
 }
+/* 紙の上のタッチは、iPad の標準の動きをすべて止める。
+   短い画を近くに素早く続けて書くと、iPad が2画目をダブルタップ
+   (拡大などの操作)と受け取り、アプリに渡さずに消していた。
+   実機の記録で、抜けた画にはポインタの通し番号すら振られて
+   いなかった(ブラウザが渡す前に捨てている)。
+   ペンも指もタッチとして届くので、ここで止めればどちらにも効く。
+   拡大縮小は自前で作ってあるので影響しない。 */
+["touchstart","touchmove","touchend","touchcancel"].forEach(function(type){
+  sheet.addEventListener(type, function(e){
+    if(e.cancelable) e.preventDefault();
+  }, {passive:false});
+});
+document.addEventListener("dblclick", function(e){
+  if(sheet.contains(e.target)) e.preventDefault();
+}, {passive:false});
 stage.addEventListener("pointerup", endTouch);
 stage.addEventListener("pointercancel", endTouch);
 
