@@ -1006,9 +1006,7 @@ function paint(ctx, m, W, H, s){
   paintSegments(ctx, m, W, H, unit, 1);
 }
 
-/* 線の from 番目の点から最後までを描く。書いている最中は、
-   増えたぶんだけをここで描き足す(毎回ページ全体を描き直すと、
-   線や判子が増えるほど遅れてペン先に付いてこなくなる)。 */
+/* 線の from 番目の点から最後までを描く */
 function paintSegments(ctx, m, W, H, unit, from){
   var p=m.pts;
   ctx.lineCap="round"; ctx.lineJoin="round"; ctx.strokeStyle=m.color;
@@ -1022,12 +1020,16 @@ function paintSegments(ctx, m, W, H, unit, from){
   }
 }
 
-/* 書いている線の、まだ描いていないぶんだけを描く */
-function paintTail(m){
-  inkCtx.setTransform(view.dpr,0,0,view.dpr,0,0);
-  var unit = m.rel ? m.rel*view.w : m.size;
-  paintSegments(inkCtx, m, view.w, view.h, unit, m.drawn||1);
-  m.drawn = m.pts.length;
+/* 書いている最中の表示。
+   以前は増えたぶんだけ描き足していたが、iPad(Chrome/Safari)では
+   描き足した線が画面に出ないことがあり、2画目以降が表示されなかった
+   (実機の記録で、入力は届いて線として残っているのに見えないことを確認)。
+   毎回キャンバス全体を消して描き直す方式に戻す。ただし描き直すのは
+   画面の書き換え1回につき1回まで。ペンの細かい動きごとには描き直さない。 */
+var inkFrame=0;
+function scheduleRedraw(){
+  if(inkFrame) return;
+  inkFrame = requestAnimationFrame(function(){ inkFrame=0; redraw(); });
 }
 
 function updateInkButtons(){
@@ -1095,7 +1097,6 @@ function redraw(){
   inkCtx.clearRect(0,0,view.w,view.h);
   var list=marks[pageNo]||[];
   for(var i=0;i<list.length;i++) paint(inkCtx, list[i], view.w, view.h, 1);
-  if(drawing && drawing.pts) drawing.drawn = drawing.pts.length;
   updateInkButtons();
 }
 
@@ -1170,11 +1171,7 @@ inkCv.addEventListener("pointerdown", function(e){
   marks[pageNo].push(drawing);
   setDirty(true);
 
-  // 書き始めの点だけ描く。ページ全体は描き直さない
-  inkCtx.setTransform(view.dpr,0,0,view.dpr,0,0);
-  paint(inkCtx, drawing, view.w, view.h, 1);
-  drawing.drawn = 1;
-  updateInkButtons();
+  scheduleRedraw();
 }, {passive:false});
 
 inkCv.addEventListener("pointermove", function(e){
@@ -1193,14 +1190,15 @@ inkCv.addEventListener("pointermove", function(e){
     var last=drawing.pts[drawing.pts.length-1];
     drawing.pts.push({x:p.x, y:p.y, p:pressure(evts[k], last.p)});
   }
-  paintTail(drawing);
+  scheduleRedraw();
 }, {passive:false});
 
 function endStroke(e){
   if(drawing) diag("app:stroke-end", e, (e && e.type) + " pts=" + (drawing.pts ? drawing.pts.length : "-"));
   if(e && e.pointerType==="pen"){ penDown=false; penUpAt=Date.now(); }
-  if(drawing && drawing.pts){ delete drawing.drawn; }
+  var wasDrawing = !!(drawing && drawing.pts);
   drawing=null;
+  if(wasDrawing) scheduleRedraw();   // 書き終わりの点まで確実に出す
 }
 inkCv.addEventListener("pointerup", endStroke);
 inkCv.addEventListener("pointercancel", endStroke);
