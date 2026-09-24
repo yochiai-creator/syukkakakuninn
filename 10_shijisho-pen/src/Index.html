@@ -553,7 +553,10 @@ function mountPdf(res){
   marks={}; pageNo=1; setDirty(false); penSeen=false; zoom=1;
   clearPhotos();
 
+  var restored=false;
   pdfjsLib.getDocument({data: srcBytes.slice()}).promise.then(function(doc){
+    return restoreEditable(doc).then(function(r){ restored=r.restored; return r.doc; });
+  }).then(function(doc){
     pdfDoc=doc; pageCount=doc.numPages;
     hint.hidden=true; sheet.hidden=false;
     ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl","photo"].forEach(function(id){
@@ -564,10 +567,77 @@ function mountPdf(res){
     updateNav();
     updateZoomLbl();
     markCurrent();
-    toast(curFile.name);
+    toast(restored ? curFile.name + "(前回の書き込みを直せます)" : curFile.name);
   }).catch(function(err){
     console.error(err);
     toast("PDFを表示できませんでした");
+  });
+}
+
+/* ---------- 書き込みを後から直せるようにする ----------
+   保存したPDFでは書き込みが画像として焼き込まれるので、開き直すと
+   1本ずつ消したり直したりできない。そこで上書き・別名で保存するとき、
+   「書き込む前のPDF」と「書き込みの一覧」を添付ファイルとして入れておく。
+   開いたときにこの2つがあれば、書き込む前のPDFを表示して、書き込みを
+   元の線やレ点・ハンコとして戻す。
+
+   チェック完了のときは入れない(仕上がりのPDFなので)。
+   添付の無いPDF(この仕組みより前に保存したもの)は今までどおり開く。 */
+var EDIT_BASE_NAME  = "shijisho-pen-base.pdf";
+var EDIT_MARKS_NAME = "shijisho-pen-marks.json";
+var EDIT_VERSION = 1;
+
+function restoreEditable(doc){
+  return doc.getAttachments().then(function(att){
+    var base = att && att[EDIT_BASE_NAME], saved = att && att[EDIT_MARKS_NAME];
+    if(!base || !saved || !base.content || !saved.content) return {doc:doc, restored:false};
+
+    var data = JSON.parse(new TextDecoder("utf-8").decode(saved.content));
+    if(!data || data.v !== EDIT_VERSION || !data.marks) return {doc:doc, restored:false};
+
+    var baseBytes = new Uint8Array(base.content);
+    return pdfjsLib.getDocument({data: baseBytes.slice()}).promise.then(function(baseDoc){
+      // ページ数が合わないものは、別のPDFの添付とみなして使わない
+      if(baseDoc.numPages !== data.pages){ baseDoc.destroy(); return {doc:doc, restored:false}; }
+      srcBytes = baseBytes;
+      marks = data.marks;
+      doc.destroy();
+      return {doc:baseDoc, restored:true};
+    });
+  }).catch(function(err){
+    console.warn("書き込みを戻せませんでした", err);
+    return {doc:doc, restored:false};
+  });
+}
+
+/* 保存用に書き込みを小さくする。座標は小数5桁あれば紙の上で十分細かい */
+function packMarks(){
+  var r5=function(v){ return Math.round(v*1e5)/1e5; };
+  var out={};
+  Object.keys(marks).forEach(function(k){
+    var list=(marks[k]||[]).map(function(m){
+      var c={};
+      Object.keys(m).forEach(function(key){ if(key!=="drawn") c[key]=m[key]; });
+      if(c.pts) c.pts=c.pts.map(function(p){ return {x:r5(p.x), y:r5(p.y), p:Math.round(p.p*1000)/1000}; });
+      if(typeof c.x==="number"){ c.x=r5(c.x); c.y=r5(c.y); }
+      return c;
+    });
+    if(list.length) out[k]=list;
+  });
+  return out;
+}
+
+function attachEditable(out){
+  var json = JSON.stringify({v:EDIT_VERSION, pages:pageCount, marks:packMarks()});
+  var now = new Date();
+  return out.attach(srcBytes.slice(), EDIT_BASE_NAME, {
+    mimeType:"application/pdf", description:"書き込む前のPDF(指図書 書き込み用)",
+    creationDate:now, modificationDate:now
+  }).then(function(){
+    return out.attach(new TextEncoder().encode(json), EDIT_MARKS_NAME, {
+      mimeType:"application/json", description:"書き込みの一覧(指図書 書き込み用)",
+      creationDate:now, modificationDate:now
+    });
   });
 }
 
@@ -1102,7 +1172,7 @@ function save(mode){
   btns.forEach(function(b){ b.disabled=true; });
   label.textContent="保存中…";
 
-  buildPdf(mode==="done").then(function(bytes){
+  buildPdf(mode==="done", mode!=="done").then(function(bytes){
     return new Promise(function(resolve, reject){
       google.script.run
         .withSuccessHandler(resolve)
@@ -1138,7 +1208,7 @@ function closeFile(){
   });
 }
 
-function buildPdf(withPhotos){
+function buildPdf(withPhotos, editable){
   var PDFDocument = PDFLib.PDFDocument;
   // ハンコの字がフォント未読込のまま焼き込まれないように待つ
   var fontReady = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
@@ -1171,6 +1241,7 @@ function buildPdf(withPhotos){
 
     return chain
       .then(function(){ return withPhotos ? appendPhotos(out) : null; })
+      .then(function(){ return editable ? attachEditable(out) : null; })
       .then(function(){ return out.save(); });
   });
 }
