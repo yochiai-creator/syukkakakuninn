@@ -769,6 +769,21 @@ $("#zoomLbl").onclick = function(){ applyZoom(1); };
    キャンバスのリサイズとスクロール補正が重なって画面が震える。
    変形中は少しぼやけるが、離した時点で綺麗に描き直される。 */
 var touches={}, pinch=null;
+var PINCH_START_RATIO=0.08, PINCH_START_PX=20;
+
+/* ペンが触れたら、ペンを優先する。
+   手のひらを置いたまま次の画を書くと、置いた手のひらが2本指のピンチに
+   見えてしまい、2画目以降が書けなかった。ペンが触れた時点でピンチは
+   取りやめ、そのとき画面に触れている指はすべて手のひらとして無視する。 */
+function yieldToPen(){
+  if(pinch){
+    var live=pinch.live;
+    pinch=null;
+    if(live){ sheet.style.transform=""; sheet.style.willChange=""; updateZoomLbl(); }
+  }
+  touches={};
+  fingerStart=null;
+}
 
 /* 1本目の指が触れた時点の状態。2本目が来てピンチと分かったら
    ここまで巻き戻す。ペン未使用のときは指でも描けるため、
@@ -801,11 +816,9 @@ stage.addEventListener("pointerdown", function(e){
       cx: mx, cy: my,          // 今の中点(確定時の基準)
       px: (stage.scrollLeft + mx - r.left) - sheet.offsetLeft,
       py: (stage.scrollTop  + my - r.top ) - sheet.offsetTop,
-      k:  1
+      k:  1,
+      live: false              // 指がはっきり動くまでは拡大縮小しない
     };
-
-    sheet.style.transformOrigin="0 0";
-    sheet.style.willChange="transform";
 
     // つまもうとしただけなので、1本目の指が触れて以降に指で書いたものを
     // すべて取り消す。直前の1本だけ消すと、1本目が引いた線が残る。
@@ -841,6 +854,17 @@ stage.addEventListener("pointermove", function(e){
   var a=touches[ids[0]], b=touches[ids[1]];
   var mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
 
+  // 置いた手のひらは少しずれるだけなので、はっきり動くまでは何もしない。
+  // これが無いと、手を置き直すたびに画面がわずかに拡大・移動する。
+  if(!pinch.live){
+    var moved = Math.abs(tdist(a,b)/pinch.d - 1) > PINCH_START_RATIO ||
+                tdist({x:mx,y:my}, {x:pinch.mx,y:pinch.my}) > PINCH_START_PX;
+    if(!moved) return;
+    pinch.live = true;
+    sheet.style.transformOrigin="0 0";
+    sheet.style.willChange="transform";
+  }
+
   // 拡大率は全体表示〜600%の範囲に収める
   var k = tdist(a,b)/pinch.d;
   k = Math.max(MIN_ZOOM/pinch.z, Math.min(MAX_ZOOM/pinch.z, k));
@@ -861,6 +885,7 @@ stage.addEventListener("pointermove", function(e){
 function commitPinch(){
   var p=pinch; pinch=null;
   if(!p) return;
+  if(!p.live){ return; }          // 動かさずに離した(手のひら)。何もしない
 
   // 基準は最後の「2本の中点」。ここで残った指の位置を使うと、
   // 中点との差ぶん(数十px)だけ画面が飛ぶ。
@@ -1057,9 +1082,9 @@ function hitErase(pt){
 
 inkCv.addEventListener("pointerdown", function(e){
   if(!pdfDoc) return;
-  if(e.pointerType==="pen"){ penSeen=true; penDown=true; }
+  if(e.pointerType==="pen"){ penSeen=true; penDown=true; yieldToPen(); }
   if(penSeen && e.pointerType!=="pen") return;   // 手のひら・指は無視
-  if(pinch) return;                               // 拡大縮小の最中は書かない
+  if(pinch) return;                               // 指でつまんでいる最中は指で書かない
   if(e.pointerType==="mouse" && e.button!==0) return;
 
   e.preventDefault();
