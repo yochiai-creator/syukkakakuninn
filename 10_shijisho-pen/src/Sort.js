@@ -56,6 +56,10 @@ var SORT_MONTHS_AHEAD = 2;
 var OVERDUE_FOLDER_ID = '1IhDSDZl8bT1x1iqLclanA213cENGIdD3';
 var SORT_MOVE_OVERDUE = true;
 
+// ◆チェック完了 は「チェックした月」に入る。今月から何か月さかのぼって見るか。
+// 振り分けるのは出荷日がまだ先のものだけなので、少しさかのぼれば足りる。
+var DONE_LOOKBACK_MONTHS = 3;
+
 // 得意先マスタ(コード→会社名)の置き場。'001_【出荷】 の直下に作る。
 var MASTER_PARENT_ID = '1iSYAN13NXaxaLkhVdEywcJkJ0YdVULBu';
 var PROP_MASTER_SHEET = 'CUSTOMER_MASTER_ID';
@@ -73,8 +77,9 @@ var SORT_CONTINUE_AFTER_MS = 2 * 60 * 1000;
  *
  *   1. 新しい指図書を容器種類別へコピーする
  *   2. マスタの会社名が変わっていれば、コピーの名前を直す
- *   3. 出荷日を過ぎた未チェックのコピーを '004_要確認 へ移す
- *   4. マスタに無い得意先を表に書き足す(会社名は空欄)
+ *   3. チェック完了したのに容器種類別に残っているコピーをゴミ箱へ
+ *   4. 出荷日を過ぎた未チェックのコピーを '004_要確認 へ移す
+ *   5. マスタに無い得意先を表に書き足す(会社名は空欄)
  *
  * 時間切れで残りが出たら、2分後にもう一度自分を呼ぶ。
  */
@@ -102,6 +107,7 @@ function runSort() {
 
     put_(r, '名前を直した', step_(renameCopiesFromMaster_));
     put_(r, '途中保存の目印を付けた', step_(markSavedCopies_));
+    put_(r, 'チェック済みの残りを片付けた', step_(trashCheckedLeftovers_));
     if (SORT_MOVE_OVERDUE) put_(r, '要確認へ移した', step_(moveOverdueCopies_));
     put_(r, '表に足した得意先', step_(function () { return appendUnknownCustomers_(r.未登録); }));
 
@@ -202,7 +208,10 @@ function runMonth_(yearName, monthName, max) {
   // Drive の name contains は素直な部分一致ではなく、括弧を含む名前で
   // 取りこぼして二重コピーが起きた。手元で突き合わせる方が確実で、
   // 問い合わせも1回で済む。
-  var doneNames = collectDestNames_(sizeFolders);
+  // チェック完了したものは容器種類別から消えるので、◆チェック完了 の
+  // 名前も入れる。入れないと、次の実行でまっさらなコピーをもう一度作り、
+  // 同じ指図書を二度チェックすることになる。
+  var doneNames = collectDestNames_(sizeFolders).concat(collectCheckedNames_());
 
   var result = { コピー: [], 済み: 0, 対象外: 0, skip: [], 未登録: [], 残り: 0 };
   var files = DriveApp.getFolderById(src).getFilesByType(MimeType.PDF);
@@ -262,6 +271,10 @@ function finishResult_(result) {
   }
   if (result.名前を直した > 0) {
     memo.push('マスタに合わせてコピーの名前を ' + result.名前を直した + ' 件直しました。');
+  }
+  if (result.チェック済みの残りを片付けた > 0) {
+    memo.push('チェック完了済みなのに残っていたコピー ' + result.チェック済みの残りを片付けた +
+              ' 件をゴミ箱へ移しました(30日間は戻せます)。');
   }
   if (result.要確認へ移した > 0) {
     memo.push('出荷日を過ぎたまま残っていた ' + result.要確認へ移した + ' 件を 要確認 へ移しました。');
@@ -892,6 +905,59 @@ function collectDestNames_(sizeFolders) {
     while (it.hasNext()) names.push(it.next().getName());
   });
   return names;
+}
+
+/** ◆チェック完了 の今月から DONE_LOOKBACK_MONTHS か月ぶんのファイル名。 */
+function collectCheckedNames_() {
+  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
+  var now = new Date();
+  var y = Number(Utilities.formatDate(now, tz, 'yyyy'));
+  var m = Number(Utilities.formatDate(now, tz, 'M'));
+
+  var names = [];
+  for (var i = 0; i < DONE_LOOKBACK_MONTHS; i++) {
+    var d = new Date(y, m - 1 - i, 1);
+    var yid = findChildFolder_(DONE_FOLDER_ID, d.getFullYear() + '年');
+    var mid = yid && findChildFolder_(yid, (d.getMonth() + 1) + '月');
+    if (!mid) continue;
+    listPdfMeta_(mid).forEach(function (f) { names.push(f.name); });
+  }
+  return names;
+}
+
+/**
+ * チェック完了したのに容器種類別・要確認に残っているコピーをゴミ箱へ移す。
+ *
+ * 「別に保存」した _書込 の方でチェック完了すると、元のコピーが残る。
+ * 振り分けが ◆チェック完了 を見ていなかった頃に作り直したコピーも残っている。
+ * どちらも、もう一度チェックする必要のない重複。
+ *
+ * 途中保存(上書き)したものと _書込 のものは、書き込みがあるので触らない。
+ * 完全削除ではなくゴミ箱なので、30日間は Drive から戻せる。
+ */
+function trashCheckedLeftovers_() {
+  var checked = collectCheckedNames_();
+  if (!checked.length) return { 件数: 0, 一覧: [] };
+
+  var folders = [];
+  var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
+  Object.keys(index).forEach(function (kg) { folders.push(index[kg]); });
+  folders.push({ id: OVERDUE_FOLDER_ID, path: '要確認' });
+
+  var trashed = [];
+  folders.forEach(function (fo) {
+    listPdfMeta_(fo.id).forEach(function (f) {
+      var m = f.name.match(/^\d{2}\.\d{2}\.\d{2}_[^_]+_/);   // 26.09.25_26-60749-0(1)_
+      if (!m) return;
+      if (isSaved_(f) || /_書込(_\d+)?\.pdf$/i.test(f.name)) return;
+      if (!alreadyCopied_(m[0], checked)) return;
+
+      DriveApp.getFileById(f.id).setTrashed(true);
+      trashed.push(fo.path + '/' + f.name);
+    });
+  });
+
+  return { 件数: trashed.length, 一覧: trashed };
 }
 
 /** 同じ日付・依頼Noのコピーが既にあるか。先頭一致で見る。 */
