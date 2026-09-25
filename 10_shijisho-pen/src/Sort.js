@@ -89,12 +89,16 @@ function runSort() {
   try {
     clearContinueTrigger_();
 
+    // 出荷実績の取り込み(版ごとに1回だけ)
+    var seeded = step_(applyMasterSeed_);
+
     // マスタを先に読んでおく。読めないまま進むと、全件 OCR したうえで
     // 会社名を崩れた読みのまま付けてしまう。読めなければここで止める
     // (トリガーの失敗はメールで知らせが来る)。
     loadCustomerMaster_();
 
     var r = sortMonths_(targetMonths_(), 100000);  // 打ち切りは時間の方で効かせる
+    if (seeded !== '済み') r.出荷実績の取り込み = seeded;
 
     put_(r, '名前を直した', step_(renameCopiesFromMaster_));
     put_(r, '途中保存の目印を付けた', step_(markSavedCopies_));
@@ -250,6 +254,9 @@ function finishResult_(result) {
     ? '残り ' + result.残り + ' 件。2分後に続きを自動で回します。'
     : '対象の月は全部終わりました。');
 
+  if (result.出荷実績の取り込み > 0) {
+    memo.push('出荷実績から得意先マスタを ' + result.出荷実績の取り込み + ' 行そろえました(会社名は略称に)。');
+  }
   if (result.途中保存の目印を付けた > 0) {
     memo.push('前から上書きしてあった ' + result.途中保存の目印を付けた + ' 件に、途中保存の目印を付けました。');
   }
@@ -444,7 +451,74 @@ function masterId_() {
   return ss.id;
 }
 
-var MASTER_HEADER = ['得意先コード', '会社名', 'OCRの読み(参考)', '例'];
+var MASTER_HEADER = ['得意先コード', '会社名', 'OCRの読み・以前の名前(参考)', '例・出荷実績'];
+var OLD_NAME_SEP = ' / ';
+var PROP_MASTER_SEED = 'MASTER_SEED_VERSION';
+
+/**
+ * 出荷実績(MasterSeed.js)を得意先マスタに取り込む。版ごとに1回だけ。
+ *
+ * 会社名(B列)は実績の略称にそろえる。それまでの名前は C列に残す
+ * (コードの記録が無い古いコピーを、その名前から探して付け替えるため)。
+ * 実績に無いコードの行はそのまま残す。
+ * 会社名が空欄だった行(振り分けで見つかった未登録の得意先)も埋まる。
+ *
+ * @return {number|string} 変えた行の数。取り込み済みなら '済み'
+ */
+function applyMasterSeed_() {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty(PROP_MASTER_SEED) === MASTER_SEED_VERSION) return '済み';
+
+  var rows = readMasterRows_();
+  var at = {};
+  rows.forEach(function (r, i) { at[codeKey_(r[0])] = i; });
+
+  var changed = 0;
+  MASTER_SEED.forEach(function (s) {
+    var code = s[0], name = s[1], note = '出荷実績 ' + s[3] + '件・最終 ' + s[2];
+    var i = at[codeKey_(code)];
+    if (i === undefined) {
+      rows.push([code, name, '', note]);
+      at[codeKey_(code)] = rows.length - 1;
+      changed++;
+      return;
+    }
+    var r = rows[i];
+    if (r[1] !== name) {
+      if (r[1]) r[2] = addOldName_(r[2], r[1]);
+      r[1] = name;
+      changed++;
+    }
+    r[3] = note;
+  });
+
+  // 会社名が空欄の行を上に、あとはコード順
+  rows.sort(function (a, b) {
+    if (!a[1] !== !b[1]) return a[1] ? 1 : -1;
+    var x = codeKey_(a[0]), y = codeKey_(b[0]);
+    var nx = /^\d+$/.test(x), ny = /^\d+$/.test(y);
+    if (nx && ny) return Number(x) - Number(y);
+    if (nx !== ny) return nx ? -1 : 1;
+    return x < y ? -1 : x > y ? 1 : 0;
+  });
+
+  var csv = [MASTER_HEADER].concat(rows).map(function (r) {
+    return r.map(csvCell_).join(',');
+  }).join('\n') + '\n';
+  Drive.Files.update({}, masterId_(), Utilities.newBlob(csv, 'text/csv', 'master.csv'),
+                     { supportsAllDrives: true });
+
+  props.setProperty(PROP_MASTER_SEED, MASTER_SEED_VERSION);
+  customerMasterCache_ = null;
+  return changed;
+}
+
+function addOldName_(list, name) {
+  var parts = String(list || '').split(OLD_NAME_SEP).map(function (x) { return x.trim(); })
+    .filter(function (x) { return x; });
+  if (parts.indexOf(name) < 0) parts.push(name);
+  return parts.join(OLD_NAME_SEP);
+}
 
 /**
  * 表の中身を行の配列で返す(見出しは除く)。
@@ -487,12 +561,12 @@ function appendUnknownCustomers_(unknowns) {
 
   var rows = readMasterRows_();
   var have = {};
-  rows.forEach(function (r) { have[normCode_(r[0])] = true; });
+  rows.forEach(function (r) { have[codeKey_(r[0])] = true; have['~' + fuzzyKey_(r[0])] = true; });
 
   var add = [];
   fresh.forEach(function (u) {
-    var k = normCode_(u.コード);
-    if (have[k]) return;
+    var k = codeKey_(u.コード);
+    if (have[k] || have['~' + fuzzyKey_(u.コード)]) return;
     have[k] = true;
     add.push([u.コード, '', u.OCRの名前 || '', u.例 || u.元 || '']);
   });
@@ -515,18 +589,23 @@ function appendUnknownCustomers_(unknowns) {
  * なってしまう。表の側を直しても入力のたびに同じことが起きるため、
  * 数字だけのコードは先頭のゼロを無視して比べる。
  */
-function normCode_(code) {
+function codeKey_(code) {
   code = String(code || '').trim().toUpperCase();
-
-  // OCR は O と 0、I と 1 を取り違える。同じ得意先を B070 と BO70 の
-  // 両方で読んでいたため、数字側に寄せて比べる。
-  // 数字を含むコードに限る(英字だけの語を壊さないため)。
-  if (/\d/.test(code)) code = code.replace(/O/g, '0').replace(/I/g, '1');
-
   // CSV をスプレッドシートに変換すると 0820 が数値扱いになり 820 に
   // なる。表を直しても入力のたびに同じことが起きるため、数字だけの
   // コードは先頭のゼロを無視して比べる。
   return /^\d+$/.test(code) ? String(Number(code)) : code;
+}
+
+/**
+ * OCR は O と 0、I と 1 を取り違える(B070 を BO70 と読む)ので、数字側に
+ * 寄せたキー。ただし I774 と 1774 のように本当に別のコードもあるため、
+ * これはそのままのコードで見つからなかったときの控えにだけ使う。
+ */
+function fuzzyKey_(code) {
+  code = String(code || '').trim().toUpperCase();
+  if (/\d/.test(code)) code = code.replace(/O/g, '0').replace(/I/g, '1');
+  return codeKey_(code);
 }
 
 /** ファイル名の日付を見て、出荷日が当日以前かどうか。読めなければ対象扱い。 */
@@ -550,16 +629,23 @@ function csvCell_(v) {
 /** マスタを読み込む。1回の実行につき1度だけ取りに行く。 */
 var customerMasterCache_ = null;
 
+var customerFuzzyCache_ = null;
+
 function loadCustomerMaster_() {
   if (customerMasterCache_) return customerMasterCache_;
 
-  var map = {};
+  var map = {}, fuzzy = {};
   readMasterRows_().forEach(function (r) {
-    var code = normCode_(r[0]);
-    if (code && r[1]) map[code] = r[1];      // 会社名が空欄の行は未登録扱い
+    var code = codeKey_(r[0]);
+    if (!code || !r[1]) return;              // 会社名が空欄の行は未登録扱い
+    map[code] = r[1];
+    // 読み替えたキーが別のコードとぶつかるときは、控えには使わない
+    var f = fuzzyKey_(r[0]);
+    fuzzy[f] = (f in fuzzy && fuzzy[f] !== r[1]) ? null : r[1];
   });
 
   customerMasterCache_ = map;
+  customerFuzzyCache_ = fuzzy;
   return map;
 }
 
@@ -616,7 +702,7 @@ function toHalfAlnum_(s) {
 function lookupCustomer_(code) {
   if (!code) return '';
   var map = loadCustomerMaster_();
-  return map[normCode_(code)] || '';
+  return map[codeKey_(code)] || customerFuzzyCache_[fuzzyKey_(code)] || '';
 }
 
 
@@ -864,7 +950,22 @@ function moveOverdueCopies_() {
  * 容器種類別と 要確認 の両方を見る。
  */
 function renameCopiesFromMaster_() {
-  var master = loadCustomerMaster_();
+  loadCustomerMaster_();
+
+  // 以前の名前(C列)と今の名前(B列)から、名前 → コード の対応を作る。
+  // コードの記録が無い古いコピーは、ファイル名の会社名をここで引く。
+  // 同じ名前が別の会社名のコードに当たるときは、どちらとも決めない。
+  var byName = {};
+  readMasterRows_().forEach(function (r) {
+    if (!r[1]) return;
+    var names = [r[1]].concat(String(r[2] || '').split(OLD_NAME_SEP));
+    names.forEach(function (n) {
+      n = String(n).trim();
+      if (!n) return;
+      if (!(n in byName)) byName[n] = r[0];
+      else if (byName[n] !== null && lookupCustomer_(byName[n]) !== r[1]) byName[n] = null;
+    });
+  });
   var folders = [];
   var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
   Object.keys(index).forEach(function (kg) { folders.push(index[kg]); });
@@ -880,10 +981,16 @@ function renameCopiesFromMaster_() {
       var m = name.match(/^(\d{2}\.\d{2}\.\d{2}_[^_]+_)/);   // 26.09.25_26-60749-0(1)_
       if (!m) continue;
 
-      var tag = String(f.getDescription() || '');
-      if (tag.indexOf(CODE_TAG) !== 0) continue;
+      var tag = String(f.getDescription() || ''), code;
+      if (tag.indexOf(CODE_TAG) === 0) {
+        code = tag.slice(CODE_TAG.length);
+      } else {
+        code = byName[name.slice(m[1].length).replace(/\.pdf$/i, '')];
+        if (!code) continue;                       // 名前からも決められない
+        f.setDescription(CODE_TAG + code);         // 次からはコードで引ける
+      }
 
-      var to = master[normCode_(tag.slice(CODE_TAG.length))];
+      var to = lookupCustomer_(code);
       if (!to) continue;                           // まだ会社名が書かれていない
 
       var want = copyName_(m[1], to);
