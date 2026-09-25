@@ -595,7 +595,8 @@ function saveDone_(fileId, original, blob) {
   var yearFolder  = childFolder_(DONE_FOLDER_ID, year);
   var monthFolder = childFolder_(yearFolder, month);
 
-  var name = uniqueName_(monthFolder, original.name);
+  // 「別に保存」した _書込 のものでも、チェック完了では元の名前に戻す
+  var name = uniqueName_(monthFolder, doneName_(original.name));
   blob.setName(name);
 
   var created = Drive.Files.create(
@@ -617,6 +618,11 @@ function saveDone_(fileId, original, blob) {
     folder: year + '/' + month,
     trashed: original.name
   };
+}
+
+/** チェック完了に置く名前。_書込 と、その後ろの _2 などを外す。 */
+function doneName_(name) {
+  return String(name).replace(/_書込(_\d+)?(?=\.pdf$)/i, '');
 }
 
 /** 親フォルダ直下の同名フォルダを返す。無ければ作る。 */
