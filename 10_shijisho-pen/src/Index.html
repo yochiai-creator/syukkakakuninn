@@ -1033,7 +1033,7 @@ stage.addEventListener("pointercancel", endTouch);
 /* ---------- ink ---------- */
 /* レ点の形。折れ目からの向きと長さ(u は太さに比例する単位) */
 var CHECK_SHORT_DX=0.70, CHECK_SHORT_DY=0.85;           // 短い方 長さ 1.1
-var CHECK_LONG_DX=4.40, CHECK_LONG_DY=3.98;             // 長い方 長さ 5.9・42度
+var CHECK_LONG_DX=5.14, CHECK_LONG_DY=2.96;             // 長い方 長さ 5.9・30度
 
 function paint(ctx, m, W, H, s){
   if(m.type==="stamp"){ paintStamp(ctx, m, W, H); return; }
@@ -1045,9 +1045,10 @@ function paint(ctx, m, W, H, s){
   if(m.type==="check"){
     // 折れ目(いちばん下の点)を基準に、短い方と長い方を引く。
     //   短い方: 長さ 1.1、左上へ
-    //   長い方: 長さ 5.9、水平から 42度
+    //   長い方: 長さ 5.9、水平から 30度
     // (以前は短い方 2.2・長い方 4.6/52度。短い方を半分に、長い方を
-    //  長く、10度寝かせてほしいとの注文で変えた。折れ目の位置は同じ)
+    //  長くして寝かせてほしいとの注文で変えた。42度で試したあと30度に
+    //  決まった。折れ目の位置は同じ)
     var u=unit*1.15;
     var vx=m.x*W - u*0.5, vy=m.y*H + u*1.5;
     ctx.lineWidth=Math.max(1.4, unit*0.85);
