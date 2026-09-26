@@ -273,6 +273,97 @@ function listPdfs() {
 }
 
 
+/* ---------------- 作業指示一覧(簡易版) ---------------- */
+
+/**
+ * 出荷日ごとの作業指示を、容器サイズを横断して返す。
+ * 正式な作業指示一覧表は当日にしか出ないので、振り分けたコピーの名前と
+ * 説明欄(数量など)から作る。チェック完了したものは ◆チェック完了 から拾う。
+ *
+ * @param {string} dayKey '26.09.29'。空なら今日(無ければ次の出荷日)
+ * @return {{days:Array, day:string, rows:Array}}
+ */
+function workSheet(dayKey) {
+  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
+  var today = Number(Utilities.formatDate(new Date(), tz, 'yyyyMMdd'));
+  var NAME = /^(\d{2})\.(\d{2})\.(\d{2})_([^_]+)_(.+?)\.pdf$/i;
+  var num = function (k) { var p = k.split('.'); return Number('20' + p[0] + p[1] + p[2]); };
+
+  var places = [];
+  var index = buildSizeIndex_(getFolderId_());
+  Object.keys(index).forEach(function (kg) { places.push({ id: index[kg].id, kg: Number(kg), done: false }); });
+  places.push({ id: OVERDUE_FOLDER_ID, kg: 0, done: false, overdue: true });
+  checkedFolderIds_().forEach(function (id) { places.push({ id: id, kg: 0, done: true }); });
+
+  var days = {}, rows = {}, order = [];
+  places.forEach(function (pl) {
+    listPdfMeta_(pl.id).forEach(function (f) {
+      var m = f.name.match(NAME);
+      if (!m) return;
+      var key = m[1] + '.' + m[2] + '.' + m[3];
+      var n = num(key);
+      var prefix = key + '_' + m[4];
+      var st = pl.done ? 'done' : isSaved_(f) ? 'saved' : 'todo';
+
+      // 一覧に出す日: 今日以降と、まだ終わっていないものが残る日
+      if (n >= today || !pl.done) {
+        var d = days[key] = days[key] || { key: key, count: 0, done: 0, seen: {} };
+        if (!d.seen[prefix]) { d.seen[prefix] = true; d.count++; }
+        if (pl.done && !d.seen['done:' + prefix]) { d.seen['done:' + prefix] = true; d.done++; }
+      }
+
+      if (!rows[key]) rows[key] = {};
+      var info = readInfo_(f.description);
+      var kg = pl.kg || sizeFromItem_(info[INFO_ITEM]);
+      var row = {
+        id: f.id, no: m[4], to: m[5].replace(/_書込(_\d+)?$/, '').replace(/_\d+$/, ''), kg: kg,
+        qty: info[INFO_QTY] || '', range: info[INFO_RANGE] || '', time: info[INFO_TIME] || '',
+        item: info[INFO_ITEM] || '', status: st, overdue: !!pl.overdue
+      };
+      var have = rows[key][prefix];
+      // 同じ指図書が2か所にあるときは、完了 > 途中保存 > 未 の順で表に出す
+      var rank = { done: 3, saved: 2, todo: 1 };
+      if (!have) { rows[key][prefix] = row; order.push(prefix); }
+      else if (rank[st] > rank[have.status]) {
+        ['qty', 'range', 'time', 'item', 'kg'].forEach(function (k) { if (!row[k]) row[k] = have[k]; });
+        rows[key][prefix] = row;
+      } else {
+        ['qty', 'range', 'time', 'item', 'kg'].forEach(function (k) { if (!have[k]) have[k] = row[k]; });
+      }
+    });
+  });
+
+  var dayList = Object.keys(days).map(function (k) {
+    return { key: k, count: days[k].count, done: days[k].done };
+  }).sort(function (a, b) { return num(a.key) - num(b.key); });
+
+  if (!dayKey || !days[dayKey]) {
+    dayKey = '';
+    for (var i = 0; i < dayList.length; i++) {
+      if (num(dayList[i].key) >= today) { dayKey = dayList[i].key; break; }
+    }
+    if (!dayKey && dayList.length) dayKey = dayList[dayList.length - 1].key;
+  }
+
+  var list = [];
+  var got = rows[dayKey] || {};
+  Object.keys(got).forEach(function (p) { list.push(got[p]); });
+  list.sort(function (a, b) {
+    return (a.kg || 999) - (b.kg || 999) || (a.no < b.no ? -1 : a.no > b.no ? 1 : 0);
+  });
+
+  return { days: dayList, day: dayKey, today: String(today), rows: list };
+}
+
+/** 品名 '新軽量47L (20kg)' から 20。読めなければ 0 */
+function sizeFromItem_(item) {
+  var m = String(item || '').match(/(\d{1,3})\s*kg/i);
+  if (m) return Number(m[1]);
+  m = String(item || '').match(/(\d{1,3})\s*L/);
+  return m && LITER_TO_KG[Number(m[1])] || 0;
+}
+
+
 /* ---------------- 検索(サブフォルダ横断) ---------------- */
 
 /**
@@ -523,7 +614,7 @@ function savePdf(req) {
   try {
     var original = Drive.Files.get(req.fileId, {
       supportsAllDrives: true,
-      fields: 'id,name,parents'
+      fields: 'id,name,parents,description'
     });
 
     var blob = Utilities.newBlob(bytes, PDF_MIME, original.name);
@@ -560,7 +651,8 @@ function savePdf(req) {
     var base = baseBlob_(req);      // 作る前に取る(file のときは元ファイルの今の中身)
 
     var created = Drive.Files.create(
-      { name: newName, parents: original.parents, properties: savedProps_() },
+      { name: newName, parents: original.parents, properties: savedProps_(),
+        description: original.description || '' },
       blob,
       { supportsAllDrives: true, fields: 'id,md5Checksum' }
     );
@@ -599,8 +691,9 @@ function saveDone_(fileId, original, blob) {
   var name = uniqueName_(monthFolder, doneName_(original.name));
   blob.setName(name);
 
+  // 説明欄(得意先コード・数量など)も引き継ぐ。作業指示一覧で使う
   var created = Drive.Files.create(
-    { name: name, parents: [monthFolder] },
+    { name: name, parents: [monthFolder], description: original.description || '' },
     blob,
     { supportsAllDrives: true }
   );

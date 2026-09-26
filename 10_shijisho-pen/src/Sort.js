@@ -106,6 +106,9 @@ function runSort() {
     if (seeded !== '済み') r.出荷実績の取り込み = seeded;
 
     put_(r, '名前を直した', step_(renameCopiesFromMaster_));
+    var filled = step_(fillCopyInfo_);
+    put_(r, '数量などを読み足した', filled);
+    if (filled && filled.残り) r.残り += filled.残り;
     put_(r, '途中保存の目印を付けた', step_(markSavedCopies_));
     put_(r, 'チェック済みの残りを片付けた', step_(trashCheckedLeftovers_));
     if (SORT_MOVE_OVERDUE) put_(r, '要確認へ移した', step_(moveOverdueCopies_));
@@ -272,6 +275,9 @@ function finishResult_(result) {
   if (result.名前を直した > 0) {
     memo.push('マスタに合わせてコピーの名前を ' + result.名前を直した + ' 件直しました。');
   }
+  if (result.数量などを読み足した > 0) {
+    memo.push('作業指示一覧のために、' + result.数量などを読み足した + ' 件のコピーから数量などを読み取りました。');
+  }
   if (result.チェック済みの残りを片付けた > 0) {
     memo.push('チェック完了済みなのに残っていたコピー ' + result.チェック済みの残りを片付けた +
               ' 件をゴミ箱へ移しました(30日間は戻せます)。');
@@ -398,9 +404,12 @@ function sortOne_(file, sizeFolders, doneNames, result) {
 
   var copy = DriveApp.getFolderById(dest.id).createFile(file.getBlob().setName(newName));
 
-  // 得意先コードをファイルの説明に残す。あとでマスタの会社名が
+  // 得意先コードと数量などをファイルの説明に残す。あとでマスタの会社名が
   // 直されたとき、OCR をやり直さずにこのコピーの名前を直せる。
-  if (code) copy.setDescription(CODE_TAG + code);
+  // 数量などはアプリの作業指示一覧(簡易版)に使う。
+  var info = extractOrderInfo_(text);
+  if (code) info[INFO_CODE] = code;
+  copy.setDescription(writeInfo_(info));
 
   doneNames.push(newName);   // 同じ実行の中でも二重にコピーしない
   result.コピー.push(dest.path + '/' + newName);
@@ -413,8 +422,54 @@ function copyName_(prefix, to) {
   return prefix + (to || '出荷先不明') + '.pdf';
 }
 
-// コピーの「説明」に残す得意先コードの書き方
-var CODE_TAG = '得意先コード:';
+/* ---------------- コピーの説明欄 ----------------
+ * 1行に1項目、「名前:値」で書く。1行目は得意先コード。
+ *   得意先コード:5200
+ *   数量:40
+ *   容器No:HXP84961~HXP85000
+ *   時間指定:9:00以降
+ *   品名:新軽量47L (20kg)
+ * 以前のコピーは「得意先コード:5200」の1行だけ。そのままでも読める。
+ */
+var INFO_CODE = '得意先コード', INFO_QTY = '数量', INFO_RANGE = '容器No',
+    INFO_TIME = '時間指定', INFO_ITEM = '品名';
+var INFO_KEYS = [INFO_CODE, INFO_QTY, INFO_RANGE, INFO_TIME, INFO_ITEM];
+
+function readInfo_(desc) {
+  var out = {};
+  String(desc || '').split(/\r?\n/).forEach(function (line) {
+    var i = line.indexOf(':');
+    if (i > 0) out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  });
+  return out;
+}
+
+function writeInfo_(info) {
+  return INFO_KEYS.filter(function (k) { return info[k]; })
+    .map(function (k) { return k + ':' + info[k]; }).join('\n');
+}
+
+/**
+ * 指図書の本文から、作業指示一覧に載せる項目を取る。読めないものは入れない。
+ *   数量 … 対比表の「数量 40本」を先に見る。無ければ 1枚目の「数量: 40」
+ */
+function extractOrderInfo_(text) {
+  var t = toHalfAlnum_(text), info = {}, m;
+
+  m = t.match(/数量[\s:：]*(\d{1,4})\s*本/) || t.match(/数量\s*[:：]\s*(\d{1,4})(?!\d)/);
+  if (m) info[INFO_QTY] = String(Number(m[1]));
+
+  m = t.match(/容器(?:No|NO|№)\.?\s*[:：]?\s*([A-Z]{1,4}\d{3,7})[\s\\~〜～\-]+([A-Z]{1,4}\d{3,7})/);
+  if (m) info[INFO_RANGE] = m[1] + '~' + m[2];
+
+  m = t.match(/時間指定[ \t:：]*([^\r\n]{1,20})/);
+  if (m && /\d/.test(m[1])) info[INFO_TIME] = m[1].replace(/\s+/g, '').trim();
+
+  m = t.match(/品名[\s:：]*([^\r\n]{2,40})/);
+  if (m) info[INFO_ITEM] = m[1].replace(/LP\s*ガス容器.*$/, '').replace(/\s+/g, ' ').trim();
+
+  return info;
+}
 
 
 /* ---------------- 得意先マスタ ---------------- */
@@ -909,20 +964,58 @@ function collectDestNames_(sizeFolders) {
 
 /** ◆チェック完了 の今月から DONE_LOOKBACK_MONTHS か月ぶんのファイル名。 */
 function collectCheckedNames_() {
+  var names = [];
+  checkedFolderIds_().forEach(function (id) {
+    listPdfMeta_(id).forEach(function (f) { names.push(f.name); });
+  });
+  return names;
+}
+
+/** ◆チェック完了 の今月からDONE_LOOKBACK_MONTHS か月ぶんの月フォルダ */
+function checkedFolderIds_() {
   var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
   var now = new Date();
   var y = Number(Utilities.formatDate(now, tz, 'yyyy'));
   var m = Number(Utilities.formatDate(now, tz, 'M'));
-
-  var names = [];
+  var ids = [];
   for (var i = 0; i < DONE_LOOKBACK_MONTHS; i++) {
     var d = new Date(y, m - 1 - i, 1);
     var yid = findChildFolder_(DONE_FOLDER_ID, d.getFullYear() + '年');
     var mid = yid && findChildFolder_(yid, (d.getMonth() + 1) + '月');
-    if (!mid) continue;
-    listPdfMeta_(mid).forEach(function (f) { names.push(f.name); });
+    if (mid) ids.push(mid);
   }
-  return names;
+  return ids;
+}
+
+/**
+ * 説明欄に数量などが無いコピーを読み直して書き足す(この仕組みより前の
+ * コピー向け)。出荷日が今日以降のものだけ。1件17秒ほどかかるので、
+ * 振り分けの残り時間で進め、残ったぶんは続きの実行に回す。
+ */
+function fillCopyInfo_() {
+  var today = Number(Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Tokyo', 'yyyyMMdd'));
+  var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
+  var filled = [], left = 0;
+
+  Object.keys(index).forEach(function (kg) {
+    listPdfMeta_(index[kg].id).forEach(function (f) {
+      var m = f.name.match(/^(\d{2}\.\d{2}\.\d{2})_[^_]+_/);
+      if (!m || shipDateNum_(m[1]) < today) return;
+      var info = readInfo_(f.description);
+      if (info[INFO_QTY] || info._読めず) return;
+
+      if (Date.now() - sortStarted_ > SORT_TIME_BUDGET_MS) { left++; return; }
+
+      var got = extractOrderInfo_(readPdfText_(DriveApp.getFileById(f.id)));
+      INFO_KEYS.forEach(function (k) { if (got[k] && !info[k]) info[k] = got[k]; });
+      // 数量が読めなかったものは印を付けて、毎回読み直さないようにする
+      var desc = writeInfo_(info) + (info[INFO_QTY] ? '' : '\n_読めず:1');
+      Drive.Files.update({ description: desc }, f.id, null, { supportsAllDrives: true });
+      filled.push(index[kg].path + '/' + f.name + (info[INFO_QTY] ? '  ' + info[INFO_QTY] + '本' : '  (数量読めず)'));
+    });
+  });
+
+  return { 件数: filled.length, 一覧: filled, 残り: left };
 }
 
 /**
@@ -1047,13 +1140,12 @@ function renameCopiesFromMaster_() {
       var m = name.match(/^(\d{2}\.\d{2}\.\d{2}_[^_]+_)/);   // 26.09.25_26-60749-0(1)_
       if (!m) continue;
 
-      var tag = String(f.getDescription() || ''), code;
-      if (tag.indexOf(CODE_TAG) === 0) {
-        code = tag.slice(CODE_TAG.length);
-      } else {
+      var info = readInfo_(f.getDescription()), code = info[INFO_CODE];
+      if (!code) {
         code = byName[name.slice(m[1].length).replace(/\.pdf$/i, '')];
         if (!code) continue;                       // 名前からも決められない
-        f.setDescription(CODE_TAG + code);         // 次からはコードで引ける
+        info[INFO_CODE] = code;
+        f.setDescription(writeInfo_(info));        // 次からはコードで引ける
       }
 
       var to = lookupCustomer_(code);
@@ -1133,7 +1225,7 @@ function listPdfMeta_(folderId) {
       q: "'" + folderId + "' in parents and mimeType = 'application/pdf' and trashed = false",
       pageSize: 1000,
       pageToken: token || undefined,
-      fields: 'nextPageToken,files(id,name,md5Checksum,modifiedTime,properties)',
+      fields: 'nextPageToken,files(id,name,md5Checksum,modifiedTime,properties,description)',
       supportsAllDrives: true,
       includeItemsFromAllDrives: true
     });
