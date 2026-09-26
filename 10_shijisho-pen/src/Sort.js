@@ -69,6 +69,8 @@ var SORT_DAILY_HOUR = 6;
 
 // 時間切れで残りが出たときの続きの実行。1回ぶんのトリガーの ID を持つ。
 var PROP_CONTINUE_TRIGGER = 'SORT_CONTINUE_TRIGGER';
+var PROP_DAILY_TRIGGER = 'SORT_DAILY_TRIGGER';
+var PROP_DAILY_OFF = 'SORT_DAILY_OFF';   // removeSortTrigger で止めたときの印
 var SORT_CONTINUE_AFTER_MS = 2 * 60 * 1000;
 
 
@@ -102,17 +104,28 @@ function runSort() {
     // (トリガーの失敗はメールで知らせが来る)。
     loadCustomerMaster_();
 
+    // 毎朝の自動実行が入っていなければ入れる(入れ忘れ・消えたときの備え)
+    var daily = step_(ensureDailyTrigger_);
+
+    // 片付けは先に済ませる。振り分けが時間いっぱいまで回っても、
+    // 出荷日を過ぎたものが容器種類別に残らないように。
+    var early = {};
+    put_(early, 'チェック済みの残りを片付けた', step_(trashCheckedLeftovers_));
+    if (SORT_MOVE_OVERDUE) put_(early, '要確認へ移した', step_(moveOverdueCopies_));
+
     var r = sortMonths_(targetMonths_(), 100000);  // 打ち切りは時間の方で効かせる
     if (seeded !== '済み') r.出荷実績の取り込み = seeded;
+    r.毎朝の自動実行 = daily;
+    Object.keys(early).forEach(function (k) { r[k] = early[k]; });
 
     put_(r, '名前を直した', step_(renameCopiesFromMaster_));
+    put_(r, '途中保存の目印を付けた', step_(markSavedCopies_));
+    put_(r, '表に足した得意先', step_(function () { return appendUnknownCustomers_(r.未登録); }));
+
+    // いちばん時間のかかる読み足しは最後。残り時間のぶんだけ進める
     var filled = step_(fillCopyInfo_);
     put_(r, '数量などを読み足した', filled);
     if (filled && filled.残り) r.残り += filled.残り;
-    put_(r, '途中保存の目印を付けた', step_(markSavedCopies_));
-    put_(r, 'チェック済みの残りを片付けた', step_(trashCheckedLeftovers_));
-    if (SORT_MOVE_OVERDUE) put_(r, '要確認へ移した', step_(moveOverdueCopies_));
-    put_(r, '表に足した得意先', step_(function () { return appendUnknownCustomers_(r.未登録); }));
 
     if (r.残り) scheduleContinue_();
 
@@ -266,6 +279,9 @@ function finishResult_(result) {
     ? '残り ' + result.残り + ' 件。2分後に続きを自動で回します。'
     : '対象の月は全部終わりました。');
 
+  if (/^入れました/.test(result.毎朝の自動実行 || '')) {
+    memo.push('毎朝の自動実行が入っていなかったので入れました。明日から朝 ' + SORT_DAILY_HOUR + ' 時ごろに回ります。');
+  }
   if (result.出荷実績の取り込み > 0) {
     memo.push('出荷実績から得意先マスタを ' + result.出荷実績の取り込み + ' 行そろえました(会社名は略称に)。');
   }
@@ -303,10 +319,12 @@ function finishResult_(result) {
  */
 function installSortTrigger() {
   removeSortTrigger();
-  ScriptApp.newTrigger('runSort')
+  var t = ScriptApp.newTrigger('runSort')
     .timeBased().everyDays(1).atHour(SORT_DAILY_HOUR)
     .inTimezone(Session.getScriptTimeZone() || 'Asia/Tokyo')
     .create();
+  PropertiesService.getScriptProperties().setProperty(PROP_DAILY_TRIGGER, t.getUniqueId());
+  PropertiesService.getScriptProperties().deleteProperty(PROP_DAILY_OFF);
 
   var msg = '毎朝 ' + SORT_DAILY_HOUR + ' 時ごろに振り分けが自動で回るようにしました。';
   Logger.log(msg);
@@ -321,10 +339,37 @@ function removeSortTrigger() {
     if (names[t.getHandlerFunction()]) { ScriptApp.deleteTrigger(t); n++; }
   });
   PropertiesService.getScriptProperties().deleteProperty(PROP_CONTINUE_TRIGGER);
+  PropertiesService.getScriptProperties().deleteProperty(PROP_DAILY_TRIGGER);
+  PropertiesService.getScriptProperties().setProperty(PROP_DAILY_OFF, '1');
 
   var msg = n + ' 件の自動実行を止めました。';
   Logger.log(msg);
   return msg;
+}
+
+/**
+ * 毎朝のトリガーがあるか確かめ、無ければ入れる。runSort のたびに見る。
+ * (以前は installSortTrigger を別に実行する必要があり、入れ忘れると
+ *  毎朝の振り分けも要確認への移動も止まったままになっていた)
+ */
+function ensureDailyTrigger_() {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty(PROP_DAILY_OFF)) return '止めてあります(installSortTrigger で再開)';
+  var id = props.getProperty(PROP_DAILY_TRIGGER);
+  var have = id && ScriptApp.getProjectTriggers().some(function (t) { return t.getUniqueId() === id; });
+  if (have) return '入っています';
+
+  // 印の無い古い毎朝トリガー(前の版で入れたもの)は、入れ直すときに消す
+  var cont = PropertiesService.getScriptProperties().getProperty(PROP_CONTINUE_TRIGGER);
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'runSort' && t.getUniqueId() !== cont) ScriptApp.deleteTrigger(t);
+  });
+  var t = ScriptApp.newTrigger('runSort')
+    .timeBased().everyDays(1).atHour(SORT_DAILY_HOUR)
+    .inTimezone(Session.getScriptTimeZone() || 'Asia/Tokyo')
+    .create();
+  PropertiesService.getScriptProperties().setProperty(PROP_DAILY_TRIGGER, t.getUniqueId());
+  return '入れました(毎朝 ' + SORT_DAILY_HOUR + ' 時ごろ)';
 }
 
 /** 時間切れで残ったぶんを、少し後にもう一度回す。 */
