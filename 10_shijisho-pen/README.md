@@ -1,5 +1,8 @@
 # 10_shijisho-pen — 指図書 書き込み (GAS Web アプリ)
 
+> 全体の構成・各ファイルの中身・設計判断・今の運用手順は [ARCHITECTURE.md](ARCHITECTURE.md) にまとめてある。
+> このファイルは最初に GAS プロジェクトを作ったときのセットアップ手順。
+
 `00_ai-clerk-core` と同じ構成（`rootDir = ./src`、ソースは `src/` 配下、
 `appsscript.json` は Asia/Tokyo / V8 / STACKDRIVER / Drive v3）に揃えたプロジェクト。
 
