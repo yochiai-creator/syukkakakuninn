@@ -970,6 +970,16 @@ function sanitizeName_(s) {
  * フォルダ名の全角・半角の違い(10Ｋ と ８Ｋ が混在している)を吸収する。
  */
 function buildSizeIndex_(rootId) {
+  // フォルダの並びはめったに変わらないので10分覚えておく
+  var cache = (typeof CacheService !== 'undefined') ? CacheService.getScriptCache() : null;
+  var hit = cache && cache.get('sizeIndex:' + rootId);
+  if (hit) return JSON.parse(hit);
+  var index = buildSizeIndexNow_(rootId);
+  if (cache) cache.put('sizeIndex:' + rootId, JSON.stringify(index), 10 * 60);
+  return index;
+}
+
+function buildSizeIndexNow_(rootId) {
   var index = {};
   var root = DriveApp.getFolderById(rootId);
 
@@ -1030,6 +1040,17 @@ function collectCheckedNames_() {
  * @return {Array<{id:string, kg:number}>} 月フォルダ直下は kg=0
  */
 function checkedFolders_() {
+  // 10分覚えておく(作業指示一覧を開くたびにフォルダをたどらない)。
+  // チェック完了の保存で新しいサイズのフォルダができたら、覚えたものを捨てる
+  var cache = (typeof CacheService !== 'undefined') ? CacheService.getScriptCache() : null;
+  var hit = cache && cache.get('checkedFolders');
+  if (hit) return JSON.parse(hit);
+  var out = checkedFoldersNow_();
+  if (cache) cache.put('checkedFolders', JSON.stringify(out), 10 * 60);
+  return out;
+}
+
+function checkedFoldersNow_() {
   var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
   var now = new Date();
   var y = Number(Utilities.formatDate(now, tz, 'yyyy'));

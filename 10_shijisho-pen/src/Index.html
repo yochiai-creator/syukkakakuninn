@@ -737,7 +737,7 @@ function renderFolder(data){
   renderCrumb(data);
   $("#goUp").disabled = !!data.isRoot;
   var box=$("#files"); box.innerHTML="";
-  if(data.savedCount) box.appendChild(savedSumRow(data.savedCount));
+  if(savedN) box.appendChild(savedSumRow(savedN));
   if(!data.folders.length && !data.files.length){
     box.insertAdjacentHTML("beforeend", '<p class="msg">このフォルダは空です。</p>'); return;
   }
@@ -817,15 +817,42 @@ function dayFileRow(f){
   return d;
 }
 
+/* 一度開いたフォルダは中身を覚えておき、次はまずそれを出してから
+   裏で取り直す(待たずに一覧が出る)。途中保存の数は別に取り、
+   届いたら一番上に出す。 */
+var folderMemo={}, savedN=0, folderReq=0;
 function openFolder(id){
   if(!curFolder || id!==curFolder.id) curDay=null;   // 別のフォルダへ行ったら日にちは解く
-  $("#files").innerHTML='<p class="msg">読み込み中…</p>';
+  var key=id||"";
+  var mine=++folderReq;
+  if(folderMemo[key]) renderFolder(folderMemo[key]);
+  else $("#files").innerHTML='<p class="msg">読み込み中…</p>';
   google.script.run
-    .withSuccessHandler(renderFolder)
+    .withSuccessHandler(function(data){
+      folderMemo[key]=data; folderMemo[data.id]=data;
+      if(mine===folderReq) renderFolder(data);      // 後から別のフォルダを開いていたら描かない
+    })
     .withFailureHandler(function(err){
+      if(mine!==folderReq || folderMemo[key]) return;
       $("#files").innerHTML='<p class="msg">フォルダを開けませんでした。<br>'+err.message+'</p>';
     })
-    .listFolder(id||"");
+    .listFolder(key);
+  google.script.run
+    .withSuccessHandler(function(n){
+      savedN=n||0;
+      if(mine===folderReq && curFolder && !curDay) renderFolder(curFolder);
+    })
+    .withFailureHandler(function(){})
+    .savedCount();
+}
+
+/* 保存のあと、覚えている一覧にも反映しておく(取り直しを待たない) */
+function forgetFileInMemo(id, saved){
+  Object.keys(folderMemo).forEach(function(k){
+    var d=folderMemo[k];
+    d.files = d.files.filter(function(f){ return f.id!==id || saved; });
+    if(saved) d.files.forEach(function(f){ if(f.id===id){ f.saved=true; f.savedAt=new Date().toISOString(); } });
+  });
 }
 
 function refreshFiles(){ openFolder(curFolder ? curFolder.id : ""); }
@@ -1801,6 +1828,8 @@ function save(mode){
   }).then(function(res){
     setDirty(false);
     if(res.mode==="overwrite") baseSource="shelf";   // もう棚にある
+    var savedId = curFile && curFile.id;
+    if(savedId) forgetFileInMemo(savedId, res.mode!=="done");
     if(res.mode==="done"){
       toast("チェック完了 " + res.folder + " へ保存、元ファイルはゴミ箱へ");
       clearPhotos();

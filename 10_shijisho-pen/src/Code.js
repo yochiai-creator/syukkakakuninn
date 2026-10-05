@@ -149,10 +149,7 @@ function listFolder(folderId) {
   var root = getFolderId_();
   var id = String(folderId || '').trim() || root;
 
-  var meta = Drive.Files.get(id, {
-    supportsAllDrives: true,
-    fields: 'id,name,parents,mimeType'
-  });
+  var meta = folderMeta_(id);
   if (meta.mimeType !== FOLDER_MIME) throw new Error('フォルダではありません: ' + meta.name);
 
   var folders = [], files = [];
@@ -187,9 +184,28 @@ function listFolder(folderId) {
     isRoot: id === root,
     breadcrumb: breadcrumb_(meta, root),
     folders: folders,
-    files: files,
-    savedCount: countSaved_()
+    files: files
+    // 途中保存の数は savedCount() で別に取る(一覧を先に出すため)
   };
+}
+
+/** 途中保存の総数。一覧と並べて呼ばれ、届いたら一番上に出す */
+function savedCount() {
+  return countSaved_();
+}
+
+/**
+ * フォルダの名前・親・種類。1時間覚えておく(パンくずをたどるたびに
+ * 親を1つずつ問い合わせないように)。
+ */
+function folderMeta_(id) {
+  var cache = CacheService.getScriptCache();
+  var hit = cache.get('fmeta:' + id);
+  if (hit) return JSON.parse(hit);
+  var m = Drive.Files.get(id, { supportsAllDrives: true, fields: 'id,name,parents,mimeType' });
+  var keep = { id: m.id, name: m.name, parents: m.parents || [], mimeType: m.mimeType };
+  cache.put('fmeta:' + id, JSON.stringify(keep), 60 * 60);
+  return keep;
 }
 
 /** 途中保存のファイルが全部で何件あるか。一覧の一番上に出す。 */
@@ -275,7 +291,7 @@ function breadcrumb_(meta, root) {
     var pid = (cur.parents || [])[0];
     if (!pid) break;
     try {
-      cur = Drive.Files.get(pid, { supportsAllDrives: true, fields: 'id,name,parents' });
+      cur = folderMeta_(pid);
     } catch (e) {
       break; // 共有ドライブの上限などで親を取れない場合はそこで打ち切る
     }
@@ -468,21 +484,20 @@ function collectFolderIds_(root) {
 /* ---------------- 読み込み ---------------- */
 
 function loadPdf(fileId) {
-  // Drive高度サービスのfields指定は使わない。
-  // DriveApp だけで名前・種類・中身が取れるうえ、
-  // フィールド選択の食い違いで失敗する余地が無い。
-  var file = DriveApp.getFileById(fileId);
-  if (file.getMimeType() !== PDF_MIME) {
-    throw new Error('PDFではありません: ' + file.getName());
-  }
+  // 名前・種類・目印・指紋を1回で取る
+  var meta = Drive.Files.get(fileId, {
+    supportsAllDrives: true, fields: 'id,name,mimeType,properties,md5Checksum'
+  });
+  if (meta.mimeType !== PDF_MIME) throw new Error('PDFではありません: ' + meta.name);
 
   // 棚に書き込み前のPDFと書き込みの一覧があれば、そちらを返す。
   // 書き込みが焼き込まれたファイル本体は送らない(そのぶん速い)。
-  var shelf = readShelf_(fileId);
+  // 一度も保存していないファイル(途中保存の印なし)は棚を探さない。
+  var shelf = isSaved_(meta) ? readShelf_(meta) : null;
   if (shelf) {
     return {
       id: fileId,
-      name: file.getName(),
+      name: meta.name,
       data: Utilities.base64Encode(shelf.base.getBytes()),
       marks: shelf.marks,
       pages: shelf.pages
@@ -491,8 +506,8 @@ function loadPdf(fileId) {
 
   return {
     id: fileId,
-    name: file.getName(),
-    data: Utilities.base64Encode(file.getBlob().getBytes())
+    name: meta.name,
+    data: Utilities.base64Encode(DriveApp.getFileById(fileId).getBlob().getBytes())
   };
 }
 
@@ -516,14 +531,25 @@ var SHELF_NAME      = '書き込みデータ（アプリ用）';
 var PROP_SHELF      = 'SHELF_FOLDER_ID';
 var SHELF_VERSION   = 1;
 
+// 棚の2つの ID は、保存したファイル自身のプロパティにも持たせる。
+// こうすると開く・保存するときに棚を名前で探さずに済む(以前のものは名前で探す)。
+var SHELF_BASE_PROP  = 'shelfBase';
+var SHELF_MARKS_PROP = 'shelfMarks';
+
 function shelfFolder_() {
+  // 確かめるのは6時間に1回。毎回フォルダの有無を問い合わせない
+  var cache = CacheService.getScriptCache();
   var props = PropertiesService.getScriptProperties();
   var id = props.getProperty(PROP_SHELF);
+  if (id && cache.get('shelf-ok:' + id)) return id;
   if (id) {
-    try { if (!DriveApp.getFolderById(id).isTrashed()) return id; } catch (e) { /* 作り直す */ }
+    try {
+      if (!DriveApp.getFolderById(id).isTrashed()) { cache.put('shelf-ok:' + id, '1', 6 * 60 * 60); return id; }
+    } catch (e) { /* 作り直す */ }
   }
   id = childFolder_(SHELF_PARENT_ID, SHELF_NAME);
   props.setProperty(PROP_SHELF, id);
+  cache.put('shelf-ok:' + id, '1', 6 * 60 * 60);
   return id;
 }
 
@@ -531,8 +557,15 @@ function shelfNames_(fileId) {
   return { base: fileId + '.base.pdf', marks: fileId + '.marks.json' };
 }
 
-/** 棚にあるそのファイルの2つ。{ base: {id}, marks: {id} } の形。無いものは入らない */
-function shelfFiles_(fileId) {
+/**
+ * 棚にあるそのファイルの2つ。{ base: {id}, marks: {id} } の形。無いものは入らない。
+ * meta(ファイルのプロパティ)に ID があればそれを使い、無ければ名前で探す。
+ */
+function shelfFiles_(fileId, meta) {
+  var pr = (meta && meta.properties) || {};
+  if (pr[SHELF_BASE_PROP] && pr[SHELF_MARKS_PROP]) {
+    return { base: { id: pr[SHELF_BASE_PROP] }, marks: { id: pr[SHELF_MARKS_PROP] } };
+  }
   var n = shelfNames_(fileId);
   var res = Drive.Files.list({
     q: "(name = '" + q_(n.base) + "' or name = '" + q_(n.marks) + "')" +
@@ -551,29 +584,46 @@ function shelfFiles_(fileId) {
 }
 
 /** 棚から読む。使えないとき(無い・壊れている・外で差し替えられた)は null */
-function readShelf_(fileId) {
+function readShelf_(meta) {
   try {
-    var got = shelfFiles_(fileId);
+    var got = shelfFiles_(meta.id, meta);
     if (!got.base || !got.marks) return null;
 
     var data = JSON.parse(DriveApp.getFileById(got.marks.id).getBlob().getDataAsString('UTF-8'));
     if (!data || data.v !== SHELF_VERSION || !data.marks) return null;
-
-    var cur = Drive.Files.get(fileId, { supportsAllDrives: true, fields: 'md5Checksum' });
-    if (!data.md5 || data.md5 !== cur.md5Checksum) return null;
+    if (!data.md5 || data.md5 !== meta.md5Checksum) return null;   // 外で差し替えられた
 
     return { base: DriveApp.getFileById(got.base.id).getBlob(), marks: data.marks, pages: data.pages };
   } catch (e) {
-    console.warn('棚を読めませんでした: ' + fileId + ' ' + e.message);
+    console.warn('棚を読めませんでした: ' + meta.id + ' ' + e.message);
     return null;
   }
+}
+
+/** 棚のファイルがあって、ゴミ箱にも入っていないか */
+function shelfAlive_(id) {
+  try {
+    return !Drive.Files.get(id, { supportsAllDrives: true, fields: 'id,trashed' }).trashed;
+  } catch (e) {
+    return false;
+  }
+}
+
+/** 保存する中身の md5。Drive の md5Checksum と同じ形(小文字16進) */
+function md5Hex_(bytes) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, bytes).map(function (b) {
+    return ((b + 256) % 256).toString(16).replace(/^(.)$/, '0$1');
+  }).join('');
 }
 
 /** 棚に1つ置く。同じ名前があれば中身を入れ替える */
 function shelfPut_(name, blob, existing) {
   if (existing) {
-    Drive.Files.update({}, existing.id, blob, { supportsAllDrives: true });
-    return existing.id;
+    try {
+      // ゴミ箱に入れられていたら戻す。消えていたら作り直す
+      Drive.Files.update({ trashed: false }, existing.id, blob, { supportsAllDrives: true });
+      return existing.id;
+    } catch (e) { /* 下で作る */ }
   }
   return Drive.Files.create({ name: name, parents: [shelfFolder_()] }, blob,
                             { supportsAllDrives: true }).id;
@@ -592,14 +642,15 @@ function baseBlob_(req) {
     return Utilities.newBlob(Utilities.base64Decode(req.base), PDF_MIME, 'base.pdf');
   }
   if (req.baseSource === 'shelf') {
-    var got = shelfFiles_(req.fileId);
+    var got = shelfFiles_(req.fileId, req.meta_);
     if (!got.base) throw new Error('NEED_BASE');
-    return DriveApp.getFileById(got.base.id).getBlob();
+    try { return DriveApp.getFileById(got.base.id).getBlob(); }
+    catch (e) { throw new Error('NEED_BASE'); }     // 棚から消えていた
   }
   return DriveApp.getFileById(req.fileId).getBlob();
 }
 
-/** 書き込みの一覧を棚に置く。保存したファイルの指紋も入れる */
+/** 書き込みの一覧を棚に置く。保存したファイルの指紋も入れる。置いた ID を返す */
 function putShelfMarks_(targetId, marksJson, md5, existing) {
   var m = JSON.parse(marksJson || '{}');
   var body = JSON.stringify({
@@ -609,14 +660,15 @@ function putShelfMarks_(targetId, marksJson, md5, existing) {
     md5: md5,
     savedAt: new Date().toISOString()
   });
-  shelfPut_(shelfNames_(targetId).marks,
-            Utilities.newBlob(body, 'application/json', 'marks.json'), existing);
+  return shelfPut_(shelfNames_(targetId).marks,
+                   Utilities.newBlob(body, 'application/json', 'marks.json'), existing);
 }
 
 /** チェック完了したファイルの棚の2つをゴミ箱へ */
-function trashShelf_(fileId) {
+function trashShelf_(fileId, meta) {
   try {
-    var got = shelfFiles_(fileId);
+    if (meta && !isSaved_(meta)) return;     // 一度も保存していなければ棚は無い
+    var got = shelfFiles_(fileId, meta);
     [got.base, got.marks].forEach(function (f) {
       if (f) Drive.Files.update({ trashed: true }, f.id, null, { supportsAllDrives: true });
     });
@@ -641,47 +693,59 @@ function trashShelf_(fileId) {
  */
 function savePdf(req) {
   var bytes = Utilities.base64Decode(req.data);
+
+  // 元のファイルの情報を1回で取る(棚の ID もプロパティに入っている)
+  var original = Drive.Files.get(req.fileId, {
+    supportsAllDrives: true,
+    fields: 'id,name,parents,description,properties'
+  });
+  req.meta_ = original;
+
+  var blob = Utilities.newBlob(bytes, PDF_MIME, original.name);
+  var md5 = md5Hex_(bytes);
+
+  if (req.mode === 'overwrite') {
+    // 上書きする前に、書き込む前のPDFを棚に置く(file のときは今の中身がそれ)
+    var got = shelfFiles_(req.fileId, original);
+    var baseOk = req.baseSource === 'shelf' && got.base && shelfAlive_(got.base.id);
+    if (!baseOk) {
+      got.base = { id: shelfPut_(shelfNames_(req.fileId).base, baseBlob_(req), got.base) };
+    }
+    // 一覧は先に置く。指紋は手元で計算できるので、ファイルの更新を待たない
+    got.marks = { id: putShelfMarks_(req.fileId, req.marks, md5, got.marks) };
+
+    var props = savedProps_();
+    props[SHELF_BASE_PROP] = got.base.id;
+    props[SHELF_MARKS_PROP] = got.marks.id;
+    var updated = Drive.Files.update({ properties: props }, req.fileId, blob,
+                                     { supportsAllDrives: true, fields: 'id,md5Checksum' });
+    if (updated.md5Checksum && updated.md5Checksum !== md5) {
+      putShelfMarks_(req.fileId, req.marks, updated.md5Checksum, got.marks);   // 念のため合わせる
+    }
+    return {
+      id: updated.id,
+      name: original.name,
+      url: fileUrl_(updated.id),
+      mode: 'overwrite'
+    };
+  }
+
+  if (req.mode === 'done') {
+    var done = saveDone_(req.fileId, original, blob);
+    trashShelf_(req.fileId, original);
+    return done;
+  }
+
+  var base = baseBlob_(req);      // 作る前に取る(file のときは元ファイルの今の中身)
+
+  // 名前を決めてから作るまでは、ほかの保存と重ならないようにする
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
-
   try {
-    var original = Drive.Files.get(req.fileId, {
-      supportsAllDrives: true,
-      fields: 'id,name,parents,description'
-    });
-
-    var blob = Utilities.newBlob(bytes, PDF_MIME, original.name);
-
-    if (req.mode === 'overwrite') {
-      // 上書きする前に、書き込む前のPDFを棚に置く(file のときは今の中身がそれ)
-      var got = shelfFiles_(req.fileId);
-      if (req.baseSource !== 'shelf' || !got.base) {
-        got.base = { id: shelfPut_(shelfNames_(req.fileId).base, baseBlob_(req), got.base) };
-      }
-
-      var updated = Drive.Files.update({ properties: savedProps_() }, req.fileId, blob,
-                                       { supportsAllDrives: true, fields: 'id,md5Checksum' });
-      putShelfMarks_(req.fileId, req.marks, updated.md5Checksum, got.marks);
-      return {
-        id: updated.id,
-        name: original.name,
-        url: fileUrl_(updated.id),
-        mode: 'overwrite'
-      };
-    }
-
-    if (req.mode === 'done') {
-      var done = saveDone_(req.fileId, original, blob);
-      trashShelf_(req.fileId);
-      return done;
-    }
-
     var srcParent = (original.parents || [])[0];
     var newName = original.name.replace(/\.pdf$/i, '') + '_書込.pdf';
     if (srcParent) newName = uniqueName_(srcParent, newName);
     blob.setName(newName);
-
-    var base = baseBlob_(req);      // 作る前に取る(file のときは元ファイルの今の中身)
 
     var created = Drive.Files.create(
       { name: newName, parents: original.parents, properties: savedProps_(),
@@ -689,20 +753,21 @@ function savePdf(req) {
       blob,
       { supportsAllDrives: true, fields: 'id,md5Checksum' }
     );
-
-    shelfPut_(shelfNames_(created.id).base, base, null);
-    putShelfMarks_(created.id, req.marks, created.md5Checksum, null);
-
-    return {
-      id: created.id,
-      name: newName,
-      url: fileUrl_(created.id),
-      mode: 'copy'
-    };
-
   } finally {
     lock.releaseLock();
   }
+
+  var cp = savedProps_();
+  cp[SHELF_BASE_PROP] = shelfPut_(shelfNames_(created.id).base, base, null);
+  cp[SHELF_MARKS_PROP] = putShelfMarks_(created.id, req.marks, created.md5Checksum || md5, null);
+  Drive.Files.update({ properties: cp }, created.id, null, { supportsAllDrives: true });
+
+  return {
+    id: created.id,
+    name: newName,
+    url: fileUrl_(created.id),
+    mode: 'copy'
+  };
 }
 
 /**
@@ -724,21 +789,28 @@ function saveDone_(fileId, original, blob) {
   var monthFolder = cachedChildFolder_(yearFolder, month);
   var sizeFolder  = cachedChildFolder_(monthFolder, size);
 
-  // 「別に保存」した _書込 のものでも、チェック完了では元の名前に戻す
-  var name = uniqueName_(sizeFolder, doneName_(original.name));
-  blob.setName(name);
+  // 名前を決めてから作るまでは、ほかの保存と重ならないようにする
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    // 「別に保存」した _書込 のものでも、チェック完了では元の名前に戻す
+    var name = uniqueName_(sizeFolder, doneName_(original.name));
+    blob.setName(name);
 
-  // 説明欄(得意先コード・数量など)も引き継ぐ。作業指示一覧で使う
-  var created = Drive.Files.create(
-    { name: name, parents: [sizeFolder], description: original.description || '' },
-    blob,
-    { supportsAllDrives: true }
-  );
+    // 説明欄(得意先コード・数量など)も引き継ぐ。作業指示一覧で使う
+    var created = Drive.Files.create(
+      { name: name, parents: [sizeFolder], description: original.description || '' },
+      blob,
+      { supportsAllDrives: true, fields: 'id' }
+    );
+  } finally {
+    lock.releaseLock();
+  }
   if (!created || !created.id) throw new Error('チェック完了フォルダへ保存できませんでした');
 
   // ここまで来て初めて元ファイルを片付ける。
   // 完全削除ではなくゴミ箱なので、30日間は Drive から戻せる。
-  DriveApp.getFileById(fileId).setTrashed(true);
+  Drive.Files.update({ trashed: true }, fileId, null, { supportsAllDrives: true });
 
   return {
     id: created.id,
@@ -759,7 +831,7 @@ function doneSizeName_(original) {
   var pid = (original.parents || [])[0];
   if (pid) {
     try {
-      var pname = DriveApp.getFolderById(pid).getName();
+      var pname = folderName_(pid);
       if (folderSizeKg_(pname)) return pname;
     } catch (e) { /* 親を読めなければ品名で */ }
   }
@@ -782,12 +854,23 @@ function cachedChildFolder_(parentId, name) {
   var cache = CacheService.getScriptCache();
   var key = 'folder:' + parentId + '/' + name;
   var id = cache.get(key);
-  if (id) {
-    try { if (!DriveApp.getFolderById(id).isTrashed()) return id; } catch (e) { /* 探し直す */ }
-  }
+  if (id) return id;          // 覚えていれば問い合わせない(フォルダは消さない運用)
+  var before = DriveApp.getFolderById(parentId).getFoldersByName(name).hasNext();
   id = childFolder_(parentId, name);
+  if (!before) cache.remove('checkedFolders');   // 新しく作ったら、覚えたフォルダの並びを捨てる
   cache.put(key, id, 6 * 60 * 60);
   return id;
+}
+
+/** フォルダの名前。6時間覚えておく */
+function folderName_(id) {
+  var cache = CacheService.getScriptCache();
+  var name = cache.get('fname:' + id);
+  if (name === null) {
+    name = DriveApp.getFolderById(id).getName();
+    cache.put('fname:' + id, name, 6 * 60 * 60);
+  }
+  return name;
 }
 
 /** チェック完了に置く名前。_書込 と、その後ろの _2 などを外す。 */
