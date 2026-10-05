@@ -195,18 +195,37 @@ function listFolder(folderId) {
 /** 途中保存のファイルが全部で何件あるか。一覧の一番上に出す。 */
 function countSaved_() {
   try {
-    var res = Drive.Files.list({
+    var res = Drive.Files.list(withSavedScope_({
       q: savedQuery_(),
       pageSize: 200,
       fields: 'files(id)',
       supportsAllDrives: true,
-      includeItemsFromAllDrives: true,
-      corpora: 'allDrives'
-    });
+      includeItemsFromAllDrives: true
+    }));
     return (res.files || []).length;
   } catch (e) {
     return 0;          // 数えられなくても一覧は出す
   }
+}
+
+/**
+ * 途中保存を探す範囲。指図書のある共有ドライブだけに絞る(全ドライブを
+ * 探すと、ドライブが増えるほど一覧を開くのが遅くなる)。
+ * 共有ドライブでなければ今までどおり全体を探す。
+ */
+function withSavedScope_(opts) {
+  var props = PropertiesService.getScriptProperties();
+  var key = 'DRIVE_ID:' + getFolderId_();
+  var driveId = props.getProperty(key);
+  if (driveId === null) {
+    try {
+      driveId = Drive.Files.get(getFolderId_(), { supportsAllDrives: true, fields: 'driveId' }).driveId || '';
+    } catch (e) { driveId = ''; }
+    props.setProperty(key, driveId);
+  }
+  if (driveId) { opts.corpora = 'drive'; opts.driveId = driveId; }
+  else opts.corpora = 'allDrives';
+  return opts;
 }
 
 /**
@@ -217,16 +236,15 @@ function listSavedPdfs() {
   var out = [], token = null, pages = 0, folderName = {};
 
   do {
-    var res = Drive.Files.list({
+    var res = Drive.Files.list(withSavedScope_({
       q: savedQuery_(),
       orderBy: 'modifiedTime desc',
       pageSize: 200,
       pageToken: token || undefined,
       fields: 'nextPageToken,files(' + FILE_FIELDS + ')',
       supportsAllDrives: true,
-      includeItemsFromAllDrives: true,
-      corpora: 'allDrives'
-    });
+      includeItemsFromAllDrives: true
+    }));
 
     (res.files || []).forEach(function (f) {
       var info = fileInfo_(f);
@@ -289,15 +307,30 @@ function workSheet(dayKey) {
   var NAME = /^(\d{2})\.(\d{2})\.(\d{2})_([^_]+)_(.+?)\.pdf$/i;
   var num = function (k) { var p = k.split('.'); return Number('20' + p[0] + p[1] + p[2]); };
 
-  var places = [];
+  var places = {};
   var index = buildSizeIndex_(getFolderId_());
-  Object.keys(index).forEach(function (kg) { places.push({ id: index[kg].id, kg: Number(kg), done: false }); });
-  places.push({ id: OVERDUE_FOLDER_ID, kg: 0, done: false, overdue: true });
-  checkedFolderIds_().forEach(function (id) { places.push({ id: id, kg: 0, done: true }); });
+  Object.keys(index).forEach(function (kg) { places[index[kg].id] = { kg: Number(kg), done: false }; });
+  places[OVERDUE_FOLDER_ID] = { kg: 0, done: false, overdue: true };
+  checkedFolders_().forEach(function (fo) { places[fo.id] = { kg: fo.kg, done: true }; });
+
+  // フォルダごとに問い合わせず、まとめて読む
+  var byPlace = {};
+  listPdfMetaIn_(Object.keys(places)).forEach(function (f) {
+    var pid = (f.parents || []).filter(function (p) { return places[p]; })[0];
+    if (pid) (byPlace[pid] = byPlace[pid] || []).push(f);
+  });
+
+  // 品名が読めていない行のサイズを容器No. の頭から引くための対応表
+  var known = [];
+  Object.keys(byPlace).forEach(function (pid) {
+    if (places[pid].kg) byPlace[pid].forEach(function (f) { known.push({ description: f.description, kg: places[pid].kg }); });
+  });
+  var prefixKg = learnPrefixKg_(known);
 
   var days = {}, rows = {}, order = [];
-  places.forEach(function (pl) {
-    listPdfMeta_(pl.id).forEach(function (f) {
+  Object.keys(byPlace).forEach(function (pid) {
+    var pl = places[pid];
+    byPlace[pid].forEach(function (f) {
       var m = f.name.match(NAME);
       if (!m) return;
       var key = m[1] + '.' + m[2] + '.' + m[3];
@@ -314,7 +347,7 @@ function workSheet(dayKey) {
 
       if (!rows[key]) rows[key] = {};
       var info = readInfo_(f.description);
-      var kg = pl.kg || sizeFromItem_(info[INFO_ITEM]);
+      var kg = pl.kg || sizeFromInfo_(info, prefixKg);
       var row = {
         id: f.id, no: m[4], to: m[5].replace(/_書込(_\d+)?$/, '').replace(/_\d+$/, ''), kg: kg,
         qty: info[INFO_QTY] || '', range: info[INFO_RANGE] || '', time: info[INFO_TIME] || '',
@@ -684,16 +717,20 @@ function saveDone_(fileId, original, blob) {
   var year  = Utilities.formatDate(now, tz, 'yyyy') + '年';
   var month = Number(Utilities.formatDate(now, tz, 'M')) + '月';
 
-  var yearFolder  = childFolder_(DONE_FOLDER_ID, year);
-  var monthFolder = childFolder_(yearFolder, month);
+  // 月フォルダの中を容器サイズで分ける。1つのフォルダに何百件も溜まると、
+  // 保存(同名の確認)も、作業指示一覧・振り分けの読み込みも遅くなるため。
+  var size = doneSizeName_(original);
+  var yearFolder  = cachedChildFolder_(DONE_FOLDER_ID, year);
+  var monthFolder = cachedChildFolder_(yearFolder, month);
+  var sizeFolder  = cachedChildFolder_(monthFolder, size);
 
   // 「別に保存」した _書込 のものでも、チェック完了では元の名前に戻す
-  var name = uniqueName_(monthFolder, doneName_(original.name));
+  var name = uniqueName_(sizeFolder, doneName_(original.name));
   blob.setName(name);
 
   // 説明欄(得意先コード・数量など)も引き継ぐ。作業指示一覧で使う
   var created = Drive.Files.create(
-    { name: name, parents: [monthFolder], description: original.description || '' },
+    { name: name, parents: [sizeFolder], description: original.description || '' },
     blob,
     { supportsAllDrives: true }
   );
@@ -708,9 +745,49 @@ function saveDone_(fileId, original, blob) {
     name: name,
     url: fileUrl_(created.id),
     mode: 'done',
-    folder: year + '/' + month,
+    folder: year + '/' + month + '/' + size,
     trashed: original.name
   };
+}
+
+/**
+ * チェック完了で分けるサイズのフォルダ名。コピーが入っていた容器サイズの
+ * フォルダ名(20Ｋ・８Ｋ など)をそのまま使う。要確認などから完了したときは
+ * 説明欄の品名から引き、それでも分からなければ「その他」。
+ */
+function doneSizeName_(original) {
+  var pid = (original.parents || [])[0];
+  if (pid) {
+    try {
+      var pname = DriveApp.getFolderById(pid).getName();
+      if (folderSizeKg_(pname)) return pname;
+    } catch (e) { /* 親を読めなければ品名で */ }
+  }
+  var kg = sizeFromItem_(readInfo_(original.description)[INFO_ITEM]);
+  return kg ? sizeFolderName_(kg) : 'その他';
+}
+
+/** 20 → '20Ｋ'、8 → '８Ｋ'。◆容器種類別 にある名前に合わせる */
+function sizeFolderName_(kg) {
+  var index = buildSizeIndex_(getFolderId_());
+  if (index[kg]) return index[kg].path.split('/').pop();
+  return kg + 'Ｋ';
+}
+
+/**
+ * childFolder_ と同じだが、見つけた ID を6時間覚えておく。
+ * チェック完了の保存で毎回フォルダを名前で探さないようにする。
+ */
+function cachedChildFolder_(parentId, name) {
+  var cache = CacheService.getScriptCache();
+  var key = 'folder:' + parentId + '/' + name;
+  var id = cache.get(key);
+  if (id) {
+    try { if (!DriveApp.getFolderById(id).isTrashed()) return id; } catch (e) { /* 探し直す */ }
+  }
+  id = childFolder_(parentId, name);
+  cache.put(key, id, 6 * 60 * 60);
+  return id;
 }
 
 /** チェック完了に置く名前。_書込 と、その後ろの _2 などを外す。 */

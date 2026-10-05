@@ -110,6 +110,7 @@ function runSort() {
     // 片付けは先に済ませる。振り分けが時間いっぱいまで回っても、
     // 出荷日を過ぎたものが容器種類別に残らないように。
     var early = {};
+    put_(early, 'チェック完了をサイズ別に分けた', step_(sortCheckedFiles_));
     put_(early, 'チェック済みの残りを片付けた', step_(trashCheckedLeftovers_));
     if (SORT_MOVE_OVERDUE) put_(early, '要確認へ移した', step_(moveOverdueCopies_));
 
@@ -293,6 +294,9 @@ function finishResult_(result) {
   }
   if (result.数量などを読み足した > 0) {
     memo.push('作業指示一覧のために、' + result.数量などを読み足した + ' 件のコピーから数量などを読み取りました。');
+  }
+  if (result.チェック完了をサイズ別に分けた > 0) {
+    memo.push('チェック完了の月フォルダにあった ' + result.チェック完了をサイズ別に分けた + ' 件を、容器サイズのフォルダへ分けました。');
   }
   if (result.チェック済みの残りを片付けた > 0) {
     memo.push('チェック完了済みなのに残っていたコピー ' + result.チェック済みの残りを片付けた +
@@ -510,8 +514,14 @@ function extractOrderInfo_(text) {
   m = t.match(/時間指定[ \t:：]*([^\r\n]{1,20})/);
   if (m && /\d/.test(m[1])) info[INFO_TIME] = m[1].replace(/\s+/g, '').trim();
 
-  m = t.match(/品名[\s:：]*([^\r\n]{2,40})/);
-  if (m) info[INFO_ITEM] = m[1].replace(/LP\s*ガス容器.*$/, '').replace(/\s+/g, ' ').trim();
+  // 品名は容量(◯◯L か ◯◯kg)を含む行だけ採る。「品名:」の次の行に
+  // 別の欄(数量など)が読まれていることがあるため、3行先まで探す
+  m = t.match(/品名[\s:：]*((?:[^\r\n]*\r?\n?){1,3})/);
+  if (m) {
+    var line = m[1].split(/\r?\n/).filter(function (l) { return /\d\s*(L|kg)/i.test(l); })[0];
+    if (line) info[INFO_ITEM] = line.replace(/^.*?品名[\s:：]*/, '').replace(/LP\s*\S*容器.*$/, '')
+                                   .replace(/\s+/g, ' ').trim().slice(0, 40);
+  }
 
   return info;
 }
@@ -1009,27 +1019,125 @@ function collectDestNames_(sizeFolders) {
 
 /** ◆チェック完了 の今月から DONE_LOOKBACK_MONTHS か月ぶんのファイル名。 */
 function collectCheckedNames_() {
-  var names = [];
-  checkedFolderIds_().forEach(function (id) {
-    listPdfMeta_(id).forEach(function (f) { names.push(f.name); });
-  });
-  return names;
+  return listPdfMetaIn_(checkedFolders_().map(function (fo) { return fo.id; }))
+    .map(function (f) { return f.name; });
 }
 
-/** ◆チェック完了 の今月からDONE_LOOKBACK_MONTHS か月ぶんの月フォルダ */
-function checkedFolderIds_() {
+/**
+ * ◆チェック完了 の今月から DONE_LOOKBACK_MONTHS か月ぶんのフォルダ。
+ * 月フォルダと、その中の容器サイズのフォルダ(20Ｋ など)。
+ * 月フォルダ直下は、サイズで分ける前に完了したもの。
+ * @return {Array<{id:string, kg:number}>} 月フォルダ直下は kg=0
+ */
+function checkedFolders_() {
   var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
   var now = new Date();
   var y = Number(Utilities.formatDate(now, tz, 'yyyy'));
   var m = Number(Utilities.formatDate(now, tz, 'M'));
-  var ids = [];
+  var out = [];
   for (var i = 0; i < DONE_LOOKBACK_MONTHS; i++) {
     var d = new Date(y, m - 1 - i, 1);
     var yid = findChildFolder_(DONE_FOLDER_ID, d.getFullYear() + '年');
     var mid = yid && findChildFolder_(yid, (d.getMonth() + 1) + '月');
-    if (mid) ids.push(mid);
+    if (!mid) continue;
+    out.push({ id: mid, kg: 0 });
+    var it = DriveApp.getFolderById(mid).getFolders();
+    while (it.hasNext()) {
+      var sub = it.next();
+      out.push({ id: sub.getId(), kg: folderSizeKg_(sub.getName()) });
+    }
   }
-  return ids;
+  return out;
+}
+
+/**
+ * 月フォルダ直下にある完了ファイル(サイズで分ける前のもの)を、
+ * 容器サイズのフォルダへ移す。サイズは説明欄の品名から取る。
+ * 分からないものは「その他」へ。今月と先月だけ見る。
+ */
+function sortCheckedFiles_() {
+  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
+  var now = new Date();
+  var y = Number(Utilities.formatDate(now, tz, 'yyyy'));
+  var m = Number(Utilities.formatDate(now, tz, 'M'));
+  var moved = [], learned = null;
+  for (var i = 0; i < 2; i++) {
+    var d = new Date(y, m - 1 - i, 1);
+    var yid = findChildFolder_(DONE_FOLDER_ID, d.getFullYear() + '年');
+    var mid = yid && findChildFolder_(yid, (d.getMonth() + 1) + '月');
+    if (!mid) continue;
+    listPdfMeta_(mid).forEach(function (f) {
+      if (!/^\d{2}\.\d{2}\.\d{2}_/.test(f.name)) return;
+      if (!learned) learned = learnPrefixKg_();
+      var kg = sizeFromInfo_(readInfo_(f.description), learned);
+      var size = kg ? sizeFolderName_(kg) : 'その他';
+      DriveApp.getFileById(f.id).moveTo(DriveApp.getFolderById(cachedChildFolder_(mid, size)));
+      moved.push((d.getMonth() + 1) + '月/' + size + '/' + f.name);
+    });
+  }
+  return { 件数: moved.length, 一覧: moved };
+}
+
+/**
+ * 容器No. の頭の英字(HEP など)と容器サイズの対応を、容器サイズの
+ * フォルダにあるコピーから覚える。違うサイズに割れた頭は使わない。
+ * OCR の品名が崩れていても、容器No. からサイズを引けるようにするため。
+ */
+function learnPrefixKg_(files) {
+  var map = {};
+  var add = function (desc, kg) {
+    var p = rangePrefix_(readInfo_(desc)[INFO_RANGE]);
+    if (!p || !kg) return;
+    map[p] = (p in map && map[p] !== kg) ? null : kg;
+  };
+  if (files) {
+    files.forEach(function (x) { add(x.description, x.kg); });
+  } else {
+    var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
+    Object.keys(index).forEach(function (kg) {
+      listPdfMeta_(index[kg].id).forEach(function (f) { add(f.description, Number(kg)); });
+    });
+  }
+  return map;
+}
+
+/** 'HEP61451~HEP61500' → 'HEP' */
+function rangePrefix_(range) {
+  var m = String(range || '').match(/^([A-Z]{1,4})\d/);
+  return m ? m[1] : '';
+}
+
+/** 説明欄から容器サイズ。品名が読めなければ容器No. の頭から。分からなければ 0 */
+function sizeFromInfo_(info, prefixKg) {
+  return sizeFromItem_(info[INFO_ITEM]) ||
+         (prefixKg && prefixKg[rangePrefix_(info[INFO_RANGE])]) || 0;
+}
+
+/**
+ * いくつかのフォルダの PDF をまとめて読む。親を20個ずつ OR でつないで
+ * 問い合わせるので、フォルダ1つずつより呼び出しがずっと少ない。
+ */
+function listPdfMetaIn_(folderIds) {
+  var out = [];
+  for (var i = 0; i < folderIds.length; i += 20) {
+    var parents = folderIds.slice(i, i + 20).map(function (id) {
+      return "'" + id + "' in parents";
+    }).join(' or ');
+    var token = null;
+    do {
+      var res = Drive.Files.list({
+        q: '(' + parents + ") and mimeType = 'application/pdf' and trashed = false",
+        pageSize: 1000,
+        pageToken: token || undefined,
+        fields: 'nextPageToken,files(id,name,md5Checksum,modifiedTime,properties,description,parents)',
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true
+      });
+      out = out.concat(res.files || []);
+      token = res.nextPageToken;
+    } while (token);
+  }
+  return out;
 }
 
 /**
