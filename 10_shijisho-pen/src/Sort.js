@@ -173,6 +173,7 @@ function targetMonths_() {
  */
 function sortMonths_(months, max) {
   sortStarted_ = Date.now();
+  revIndex_ = buildRevisionIndex_(months);
 
   var all = {
     対象: [], コピー: [], 済み: 0, 対象外: 0, skip: [], 未登録: [], 残り: 0
@@ -193,6 +194,7 @@ function sortMonths_(months, max) {
     all.コピー = all.コピー.concat(r.コピー);
     all.skip   = all.skip.concat(r.skip);
     all.未登録 = all.未登録.concat(r.未登録);
+    all.訂正版 = (all.訂正版 || []).concat(r.訂正版 || []);
     all.済み   += r.済み;
     all.対象外 += r.対象外;
     all.残り   += r.残り;
@@ -204,6 +206,59 @@ function sortMonths_(months, max) {
 }
 
 var sortTodayNum_ = 0;   // 20260919 の形。当日以前の判定に使う
+var revIndex_ = null;    // 訂正版を見分けるための索引(buildRevisionIndex_)
+
+/**
+ * 訂正版を見分けるための索引。
+ *   newest[依頼No]   元フォルダ(対象の月)で一番新しく届いた指図書の名前
+ *   versions[依頼No] 今あるコピーと完了ファイル { id, key(出荷日), state, created }
+ * 訂正版は「同じ依頼No. で出荷日が違う指図書が後から届く」形で来る。
+ */
+function buildRevisionIndex_(months) {
+  var SRC = /_(\d{2}\.\d{2}\.\d{2})_(\d{2}-\d+-\d+(?:\(\d+\))?)\s*\.pdf$/i;
+  var COPY = /^(\d{2}\.\d{2}\.\d{2})_([^_]+)_/;
+  var idx = { newest: {}, versions: {} };
+
+  var srcIds = [];
+  months.forEach(function (ym) {
+    var y = findChildFolder_(SRC_ROOT_ID, ym[0]);
+    var m = y && findChildFolder_(y, ym[1]);
+    if (m) srcIds.push(m);
+  });
+  listPdfMetaIn_(srcIds).forEach(function (f) {
+    var m = f.name.match(SRC);
+    if (!m) return;
+    var have = idx.newest[m[2]];
+    if (!have || f.createdTime > have.created) idx.newest[m[2]] = { name: f.name, created: f.createdTime };
+  });
+
+  var places = {};
+  var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
+  Object.keys(index).forEach(function (kg) { places[index[kg].id] = 'copy'; });
+  places[OVERDUE_FOLDER_ID] = 'copy';
+  checkedFolders_().forEach(function (fo) { places[fo.id] = 'done'; });
+  listPdfMetaIn_(Object.keys(places)).forEach(function (f) {
+    var m = f.name.match(COPY);
+    if (!m) return;
+    var where = places[(f.parents || []).filter(function (p) { return places[p]; })[0]];
+    var state = where === 'done' ? '完了' : isSaved_(f) ? '途中保存' : '未';
+    (idx.versions[m[2]] = idx.versions[m[2]] || []).push({
+      id: f.id, key: m[1], state: state, created: f.createdTime, name: f.name
+    });
+  });
+  return idx;
+}
+
+/** 同じ依頼No. で出荷日が違う、いちばん新しい前の版。無ければ null */
+function previousVersion_(orderNo, date) {
+  var list = (revIndex_ && revIndex_.versions[orderNo]) || [];
+  var prev = null;
+  list.forEach(function (v) {
+    if (v.key === date) return;
+    if (!prev || v.created > prev.created) prev = v;
+  });
+  return prev;
+}
 var sortStarted_  = 0;   // 実行の開始時刻。複数の月にまたがっても1つで数える
 
 /** 1か月ぶんを処理する。開始時刻は sortStarted_ を共有する。 */
@@ -230,7 +285,7 @@ function runMonth_(yearName, monthName, max) {
   // 同じ指図書を二度チェックすることになる。
   var doneNames = collectDestNames_(sizeFolders).concat(collectCheckedNames_());
 
-  var result = { コピー: [], 済み: 0, 対象外: 0, skip: [], 未登録: [], 残り: 0 };
+  var result = { コピー: [], 済み: 0, 対象外: 0, skip: [], 未登録: [], 残り: 0, 訂正版: [] };
   var files = DriveApp.getFolderById(src).getFilesByType(MimeType.PDF);
   var done = 0;
 
@@ -291,6 +346,11 @@ function finishResult_(result) {
   }
   if (result.名前を直した > 0) {
     memo.push('マスタに合わせてコピーの名前を ' + result.名前を直した + ' 件直しました。');
+  }
+  if (result.訂正版 && result.訂正版.length) {
+    memo.push('訂正版が ' + result.訂正版.length + ' 件届きました。前の版はアプリで最初に開いたときに後ろへつなぎます。');
+  } else {
+    delete result.訂正版;
   }
   if (result.数量などを読み足した > 0) {
     memo.push('作業指示一覧のために、' + result.数量などを読み足した + ' 件のコピーから数量などを読み取りました。');
@@ -420,6 +480,10 @@ function sortOne_(file, sizeFolders, doneNames, result) {
 
   var prefix = date + '_' + orderNo + '_';
 
+  // 同じ依頼No. の訂正版が後から届いていれば、こちら(古い版)はコピーしない
+  var newest = revIndex_ && revIndex_.newest[orderNo];
+  if (newest && newest.name !== srcName) { result.済み++; return 'older'; }
+
   // コピー済みなら OCR せずに飛ばす。
   // 出荷先は OCR 由来で実行ごとに揺れるため、完全一致では見ない。
   // 末尾の _ があるので 26-60754-0_ が 26-60754-0(1)_ に当たることはない。
@@ -458,6 +522,20 @@ function sortOne_(file, sizeFolders, doneNames, result) {
   // 数量などはアプリの作業指示一覧(簡易版)に使う。
   var info = extractOrderInfo_(text);
   if (code) info[INFO_CODE] = code;
+
+  // 訂正版: 前の版を説明欄で結び、まだチェック前の前の版のコピーはゴミ箱へ
+  // (ページはアプリで最初に開いたときにつなぐ。ゴミ箱でも30日は読める)
+  var prev = previousVersion_(orderNo, date);
+  if (prev) {
+    info[INFO_PREV] = prev.id;
+    info[INFO_PREV_DATE] = prev.key;
+    info[INFO_PREV_STATE] = prev.state;
+    if (prev.state !== '完了') {
+      Drive.Files.update({ trashed: true }, prev.id, null, { supportsAllDrives: true });
+    }
+    result.訂正版 = (result.訂正版 || []).concat(
+      newName + '  ← 前の版 ' + prev.key + '(' + prev.state + ')');
+  }
   copy.setDescription(writeInfo_(info));
 
   doneNames.push(newName);   // 同じ実行の中でも二重にコピーしない
@@ -482,7 +560,12 @@ function copyName_(prefix, to) {
  */
 var INFO_CODE = '得意先コード', INFO_QTY = '数量', INFO_RANGE = '容器No',
     INFO_TIME = '時間指定', INFO_ITEM = '品名';
-var INFO_KEYS = [INFO_CODE, INFO_QTY, INFO_RANGE, INFO_TIME, INFO_ITEM];
+// 訂正版のとき: 前の版のファイル ID・出荷日・状態(未/途中保存/完了)、
+// アプリで前の版のページをつないだら 結合:済
+var INFO_PREV = '前の版', INFO_PREV_DATE = '前の版の出荷日', INFO_PREV_STATE = '前の版の状態',
+    INFO_MERGED = '結合';
+var INFO_KEYS = [INFO_CODE, INFO_QTY, INFO_RANGE, INFO_TIME, INFO_ITEM,
+                 INFO_PREV, INFO_PREV_DATE, INFO_PREV_STATE, INFO_MERGED];
 
 function readInfo_(desc) {
   var out = {};
@@ -1150,7 +1233,7 @@ function listPdfMetaIn_(folderIds) {
         q: '(' + parents + ") and mimeType = 'application/pdf' and trashed = false",
         pageSize: 1000,
         pageToken: token || undefined,
-        fields: 'nextPageToken,files(id,name,md5Checksum,modifiedTime,properties,description,parents)',
+        fields: 'nextPageToken,files(id,name,md5Checksum,modifiedTime,createdTime,properties,description,parents)',
         supportsAllDrives: true,
         includeItemsFromAllDrives: true
       });

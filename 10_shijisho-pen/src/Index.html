@@ -227,6 +227,8 @@
   .st.saved{background:#e08a00; color:#fff;}
   .st.done{background:#0b6b5e; color:#fff;}
   .st.over{background:#9a3b2c; color:#fff; margin-left:4px;}
+  .st.rev{background:#6a3fa0; color:#fff; margin-left:4px;}
+  .tag.rev{background:#6a3fa0; margin-left:6px;}
   #drawerBot #openWl{font-weight:600; color:var(--accent);}
 
   /* 確認ダイアログ。confirm() は別オリジンの埋め込み枠では
@@ -654,6 +656,7 @@ function fileRow(f){
   d.className="row" + (f.saved ? " saved" : "") + (curFile && curFile.id===f.id ? " cur" : "");
   d.dataset.id=f.id;
   var b=document.createElement("b"); b.textContent=f.name;
+  if(f.rev) b.appendChild(revTag(f.rev));
   var s=document.createElement("span");
   if(f.saved){
     // 上書きしたがチェック完了していない
@@ -797,6 +800,13 @@ function renderDay(data, day){
   }).forEach(function(f){ box.appendChild(dayFileRow(f)); });
 }
 
+/* 「訂正版」の札。前の版の出荷日を添える */
+function revTag(prevKey){
+  var t=document.createElement("em"); t.className="tag rev"; t.style.fontStyle="normal";
+  t.textContent="訂正版(前 "+dayText(prevKey)+")";
+  return t;
+}
+
 function dayFileRow(f){
   var p=parseSortName(f.name);
   var d=document.createElement("div");
@@ -805,6 +815,7 @@ function dayFileRow(f){
   var no=document.createElement("span"); no.className="no"; no.textContent=p.no;
   var to=document.createElement("span"); to.className="to"; to.textContent=p.to;
   if(p.sub){ var sb=document.createElement("span"); sb.className="sub"; sb.textContent=p.sub; to.appendChild(sb); }
+  if(f.rev){ var rv=document.createElement("span"); rv.className="sub"; rv.appendChild(revTag(f.rev)); to.appendChild(rv); }
   var st=document.createElement("span"); st.className="st";
   if(f.saved){
     var t=document.createElement("em"); t.className="tag"; t.style.fontStyle="normal";
@@ -997,6 +1008,9 @@ function renderWorkList(res){
     tag.className="st "+(r.status==="todo" ? "" : r.status);
     tag.textContent = r.status==="done" ? "完了" : r.status==="saved" ? "途中保存" : "未";
     st.appendChild(tag);
+    if(r.rev){
+      var rv=document.createElement("span"); rv.className="st rev"; rv.textContent="訂正版"; st.appendChild(rv);
+    }
     if(r.overdue && r.status!=="done"){
       var ov=document.createElement("span"); ov.className="st over"; ov.textContent="要確認"; st.appendChild(ov);
     }
@@ -1028,12 +1042,81 @@ function doOpenFile(f){
   closeDrawer();
   toast("読み込み中…");
   google.script.run
-    .withSuccessHandler(function(res){ mountPdf(res); })
+    .withSuccessHandler(function(res){
+      if(res.prev && res.prev.length) openRevision(res); else mountPdf(res);
+    })
     .withFailureHandler(function(err){ toast("開けませんでした: "+err.message); })
     .loadPdf(f.id);
 }
 
-function mountPdf(res){
+/* ---------- 訂正版 ----------
+   同じ依頼No. で出荷日が変わった指図書(訂正版)が届くと、振り分けが前の版と
+   結んでおく。最初に開いたときに、訂正版のページの後ろへ前の版のページ
+   (書き込み・チェック済みのものはそのまま)をつなぎ、Drive にも保存する。
+   前の版のページの上には「前の版」の札を付ける。 */
+function openRevision(res){
+  toast("訂正版です。前の版をつないでいます…");
+  var firstOld = 0;
+  mergeRevision(res).then(function(r){
+    firstOld = r.firstOld;
+    var data = bytesToB64(r.bytes);
+    return new Promise(function(resolve, reject){
+      google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)
+        .savePdf({fileId: res.id, data: data, mode: "merge"});
+    }).then(function(){ return data; });
+  }).then(function(data){
+    var p = res.prev[0];
+    mountPdf({id: res.id, name: res.name, data: data},
+      "訂正版です。" + firstOld + " ページ目から後ろは前の版(" + dayText(p.date) + "出荷" +
+      (p.state ? "・" + p.state : "") + ")です");
+  }).catch(function(err){
+    console.error(err);
+    toast("前の版をつなげませんでした。訂正版だけ開きます");
+    mountPdf({id: res.id, name: res.name, data: res.data});
+  });
+}
+
+function dayText(key){
+  var p = String(key||"").split(".");
+  return p.length===3 ? Number(p[1]) + "月" + Number(p[2]) + "日" : key;
+}
+
+function mergeRevision(res){
+  var D = PDFLib.PDFDocument, firstOld = 0;
+  return D.load(b64ToBytes(res.data)).then(function(out){
+    firstOld = out.getPageCount() + 1;
+    var chain = Promise.resolve();
+    res.prev.forEach(function(pv){
+      chain = chain.then(function(){ return D.load(b64ToBytes(pv.data)); })
+        .then(function(src){ return out.copyPages(src, src.getPageIndices()); })
+        .then(function(pages){
+          var text = "前の版  " + dayText(pv.date) + "出荷" + (pv.state ? "(" + pv.state + ")" : "") + "  参考";
+          return labelPng(text).then(function(png){ return out.embedPng(png); }).then(function(img){
+            pages.forEach(function(pg){
+              out.addPage(pg);
+              var sz = pg.getSize(), w = sz.width * 0.40, h = w * img.height / img.width;
+              pg.drawImage(img, {x: 10, y: sz.height - h - 8, width: w, height: h});
+            });
+          });
+        });
+    });
+    return chain.then(function(){ return out.save(); });
+  }).then(function(bytes){ return {bytes: bytes, firstOld: firstOld}; });
+}
+
+/* 前の版のページに付ける札。白地に朱の枠と字 */
+function labelPng(text){
+  var c = document.createElement("canvas"); c.width = 1200; c.height = 110;
+  var x = c.getContext("2d");
+  x.fillStyle = "rgba(255,255,255,.92)"; x.fillRect(0, 0, c.width, c.height);
+  x.strokeStyle = STAMP_COLOR; x.lineWidth = 8; x.strokeRect(4, 4, c.width - 8, c.height - 8);
+  x.fillStyle = STAMP_COLOR; x.textBaseline = "middle";
+  x.font = "bold 58px -apple-system, 'Hiragino Sans', 'Noto Sans JP', sans-serif";
+  x.fillText(text, 30, c.height / 2 + 2, c.width - 60);
+  return new Promise(function(r){ c.toBlob(r, "image/png"); }).then(function(b){ return b.arrayBuffer(); });
+}
+
+function mountPdf(res, note){
   curFile={id:res.id, name:res.name};
   srcBytes=b64ToBytes(res.data);
   marks={}; pageNo=1; setDirty(false); penSeen=false; zoom=1;
@@ -1064,7 +1147,7 @@ function mountPdf(res){
     updateNav();
     updateZoomLbl();
     markCurrent();
-    toast(restored ? curFile.name + "(前回の書き込みを直せます)" : curFile.name);
+    toast(note || (restored ? curFile.name + "(前回の書き込みを直せます)" : curFile.name));
   }).catch(function(err){
     console.error(err);
     toast("PDFを表示できませんでした");

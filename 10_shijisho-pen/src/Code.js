@@ -66,11 +66,12 @@ function fileInfo_(f) {
     size: Number(f.size || 0),
     modified: f.modifiedTime,
     saved: isSaved_(f),
-    savedAt: isSaved_(f) ? (f.properties[SAVED_AT_PROP] || f.modifiedTime) : ''
+    savedAt: isSaved_(f) ? (f.properties[SAVED_AT_PROP] || f.modifiedTime) : '',
+    rev: readInfo_(f.description)[INFO_PREV_DATE] || ''     // 訂正版なら前の版の出荷日
   };
 }
 
-var FILE_FIELDS = 'id,name,size,modifiedTime,mimeType,properties,parents';
+var FILE_FIELDS = 'id,name,size,modifiedTime,mimeType,properties,parents,description';
 
 /** 途中保存(上書き済みでチェック未完了)のファイルを探す条件 */
 function savedQuery_() {
@@ -367,17 +368,18 @@ function workSheet(dayKey) {
       var row = {
         id: f.id, no: m[4], to: m[5].replace(/_書込(_\d+)?$/, '').replace(/_\d+$/, ''), kg: kg,
         qty: info[INFO_QTY] || '', range: info[INFO_RANGE] || '', time: info[INFO_TIME] || '',
-        item: info[INFO_ITEM] || '', status: st, overdue: !!pl.overdue
+        item: info[INFO_ITEM] || '', status: st, overdue: !!pl.overdue,
+        rev: info[INFO_PREV_DATE] || ''
       };
       var have = rows[key][prefix];
       // 同じ指図書が2か所にあるときは、完了 > 途中保存 > 未 の順で表に出す
       var rank = { done: 3, saved: 2, todo: 1 };
       if (!have) { rows[key][prefix] = row; order.push(prefix); }
       else if (rank[st] > rank[have.status]) {
-        ['qty', 'range', 'time', 'item', 'kg'].forEach(function (k) { if (!row[k]) row[k] = have[k]; });
+        ['qty', 'range', 'time', 'item', 'kg', 'rev'].forEach(function (k) { if (!row[k]) row[k] = have[k]; });
         rows[key][prefix] = row;
       } else {
-        ['qty', 'range', 'time', 'item', 'kg'].forEach(function (k) { if (!have[k]) have[k] = row[k]; });
+        ['qty', 'range', 'time', 'item', 'kg', 'rev'].forEach(function (k) { if (!have[k]) have[k] = row[k]; });
       }
     });
   });
@@ -486,9 +488,20 @@ function collectFolderIds_(root) {
 function loadPdf(fileId) {
   // 名前・種類・目印・指紋を1回で取る
   var meta = Drive.Files.get(fileId, {
-    supportsAllDrives: true, fields: 'id,name,mimeType,properties,md5Checksum'
+    supportsAllDrives: true, fields: 'id,name,mimeType,properties,md5Checksum,description'
   });
   if (meta.mimeType !== PDF_MIME) throw new Error('PDFではありません: ' + meta.name);
+
+  // 訂正版で、まだ前の版をつないでいなければ、前の版も渡す(アプリでつなぐ)
+  var prev = previousVersionsToMerge_(meta);
+  if (prev.length) {
+    return {
+      id: fileId,
+      name: meta.name,
+      data: Utilities.base64Encode(DriveApp.getFileById(fileId).getBlob().getBytes()),
+      prev: prev
+    };
+  }
 
   // 棚に書き込み前のPDFと書き込みの一覧があれば、そちらを返す。
   // 書き込みが焼き込まれたファイル本体は送らない(そのぶん速い)。
@@ -609,6 +622,32 @@ function shelfAlive_(id) {
   }
 }
 
+/**
+ * 訂正版の前の版を、新しい方から順に返す。前の版がさらに訂正版で、
+ * まだつないでいなければ、その前もたどる(3つまで)。
+ * 前の版がゴミ箱にあっても30日は読める。消えていたらそこで止める。
+ * @return {Array<{date:string, state:string, data:string}>}
+ */
+function previousVersionsToMerge_(meta) {
+  var out = [];
+  var info = readInfo_(meta.description);
+  if (!info[INFO_PREV] || info[INFO_MERGED]) return out;
+  for (var i = 0; i < 3 && info[INFO_PREV]; i++) {
+    try {
+      var bytes = DriveApp.getFileById(info[INFO_PREV]).getBlob().getBytes();
+      out.push({ date: info[INFO_PREV_DATE] || '', state: info[INFO_PREV_STATE] || '',
+                 data: Utilities.base64Encode(bytes) });
+      var next = readInfo_(Drive.Files.get(info[INFO_PREV],
+                   { supportsAllDrives: true, fields: 'description' }).description);
+      if (next[INFO_MERGED]) break;          // その版はもう前の版を含んでいる
+      info = next;
+    } catch (e) {
+      break;
+    }
+  }
+  return out;
+}
+
 /** 保存する中身の md5。Drive の md5Checksum と同じ形(小文字16進) */
 function md5Hex_(bytes) {
   return Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, bytes).map(function (b) {
@@ -703,6 +742,16 @@ function savePdf(req) {
 
   var blob = Utilities.newBlob(bytes, PDF_MIME, original.name);
   var md5 = md5Hex_(bytes);
+
+  if (req.mode === 'merge') {
+    // 訂正版に前の版のページをつないだもの。中身を差し替え、つないだ印を付ける。
+    // 書き込みではないので途中保存の印は付けない
+    var inf = readInfo_(original.description);
+    inf[INFO_MERGED] = '済';
+    Drive.Files.update({ description: writeInfo_(inf) }, req.fileId, blob,
+                       { supportsAllDrives: true, fields: 'id' });
+    return { id: req.fileId, name: original.name, mode: 'merge' };
+  }
 
   if (req.mode === 'overwrite') {
     // 上書きする前に、書き込む前のPDFを棚に置く(file のときは今の中身がそれ)
