@@ -110,7 +110,9 @@ function runSort() {
     // 片付けは先に済ませる。振り分けが時間いっぱいまで回っても、
     // 出荷日を過ぎたものが容器種類別に残らないように。
     var early = {};
-    put_(early, 'チェック完了をサイズ別に分けた', step_(sortCheckedFiles_));
+    var sorted = step_(sortCheckedFiles_);
+    put_(early, 'チェック完了をサイズ別に分けた', sorted);
+    if (sorted && sorted.残り) early.チェック完了の読み直し残り = sorted.残り;
     put_(early, 'チェック済みの残りを片付けた', step_(trashCheckedLeftovers_));
     if (SORT_MOVE_OVERDUE) put_(early, '要確認へ移した', step_(moveOverdueCopies_));
 
@@ -118,6 +120,7 @@ function runSort() {
     if (seeded !== '済み') r.出荷実績の取り込み = seeded;
     r.毎朝の自動実行 = daily;
     Object.keys(early).forEach(function (k) { r[k] = early[k]; });
+    if (early.チェック完了の読み直し残り) r.残り += early.チェック完了の読み直し残り;
 
     put_(r, '名前を直した', step_(renameCopiesFromMaster_));
     put_(r, '途中保存の目印を付けた', step_(markSavedCopies_));
@@ -522,6 +525,7 @@ function sortOne_(file, sizeFolders, doneNames, result) {
   // 数量などはアプリの作業指示一覧(簡易版)に使う。
   var info = extractOrderInfo_(text);
   if (code) info[INFO_CODE] = code;
+  info[INFO_SIZE] = String(size);   // 振り分けで決めたサイズ。チェック完了の仕分けに使う
 
   // 訂正版: 前の版を説明欄で結び、まだチェック前の前の版のコピーはゴミ箱へ
   // (ページはアプリで最初に開いたときにつなぐ。ゴミ箱でも30日は読める)
@@ -559,12 +563,12 @@ function copyName_(prefix, to) {
  * 以前のコピーは「得意先コード:5200」の1行だけ。そのままでも読める。
  */
 var INFO_CODE = '得意先コード', INFO_QTY = '数量', INFO_RANGE = '容器No',
-    INFO_TIME = '時間指定', INFO_ITEM = '品名';
+    INFO_TIME = '時間指定', INFO_ITEM = '品名', INFO_SIZE = '容器サイズ';
 // 訂正版のとき: 前の版のファイル ID・出荷日・状態(未/途中保存/完了)、
 // アプリで前の版のページをつないだら 結合:済
 var INFO_PREV = '前の版', INFO_PREV_DATE = '前の版の出荷日', INFO_PREV_STATE = '前の版の状態',
     INFO_MERGED = '結合';
-var INFO_KEYS = [INFO_CODE, INFO_QTY, INFO_RANGE, INFO_TIME, INFO_ITEM,
+var INFO_KEYS = [INFO_CODE, INFO_QTY, INFO_RANGE, INFO_TIME, INFO_ITEM, INFO_SIZE,
                  INFO_PREV, INFO_PREV_DATE, INFO_PREV_STATE, INFO_MERGED];
 
 function readInfo_(desc) {
@@ -1155,31 +1159,58 @@ function checkedFoldersNow_() {
 }
 
 /**
- * 月フォルダ直下にある完了ファイル(サイズで分ける前のもの)を、
- * 容器サイズのフォルダへ移す。サイズは説明欄の品名から取る。
- * 分からないものは「その他」へ。今月と先月だけ見る。
+ * チェック完了のうち、まだ容器サイズで分けていないものを分ける(今月と先月)。
+ *   - 月フォルダ直下にあるもの(サイズで分ける前に完了したもの)
+ *   - 「その他」にあるもの(説明欄からサイズが分からなかったもの)
+ * サイズは 説明欄(容器サイズ・品名・容器No. の頭)→ PDF を読み直す、の順で決める。
+ * 読み直しは1件17秒ほどかかるので、1回の実行で2分まで。残りは次の実行で。
+ * 読み直しても分からなかったものは「その他」に残し、印を付けて読み直さない。
  */
+var CHECKED_OCR_BUDGET_MS = 2 * 60 * 1000;
+
 function sortCheckedFiles_() {
   var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
   var now = new Date();
   var y = Number(Utilities.formatDate(now, tz, 'yyyy'));
   var m = Number(Utilities.formatDate(now, tz, 'M'));
-  var moved = [], learned = null;
+  var started = Date.now();
+  var moved = [], left = 0, learned = null;
+
   for (var i = 0; i < 2; i++) {
     var d = new Date(y, m - 1 - i, 1);
     var yid = findChildFolder_(DONE_FOLDER_ID, d.getFullYear() + '年');
     var mid = yid && findChildFolder_(yid, (d.getMonth() + 1) + '月');
     if (!mid) continue;
-    listPdfMeta_(mid).forEach(function (f) {
+    var other = findChildFolder_(mid, 'その他');
+    var todo = listPdfMeta_(mid).map(function (f) { f.inOther = false; return f; })
+      .concat(other ? listPdfMeta_(other).map(function (f) { f.inOther = true; return f; }) : []);
+
+    todo.forEach(function (f) {
       if (!/^\d{2}\.\d{2}\.\d{2}_/.test(f.name)) return;
+      var inOther = f.inOther;
+      var info = readInfo_(f.description);
+      if (inOther && info._サイズ読めず) return;          // 前に読み直しても分からなかった
+
       if (!learned) learned = learnPrefixKg_();
-      var kg = sizeFromInfo_(readInfo_(f.description), learned);
+      var kg = sizeFromInfo_(info, learned);
+
+      if (!kg) {
+        if (Date.now() - started > CHECKED_OCR_BUDGET_MS) { left++; return; }
+        try { kg = extractSizeKg_(readPdfText_(DriveApp.getFileById(f.id))); } catch (e) { kg = 0; }
+      }
+
+      // 決まったサイズを説明欄に残す(作業指示一覧でも使う)。読めなかったら印を付ける
+      if (kg) info[INFO_SIZE] = String(kg);
+      var desc = writeInfo_(info) + (kg ? '' : '\n_サイズ読めず:1');
+      Drive.Files.update({ description: desc }, f.id, null, { supportsAllDrives: true });
+
       var size = kg ? sizeFolderName_(kg) : 'その他';
+      if (inOther && size === 'その他') return;
       DriveApp.getFileById(f.id).moveTo(DriveApp.getFolderById(cachedChildFolder_(mid, size)));
       moved.push((d.getMonth() + 1) + '月/' + size + '/' + f.name);
     });
   }
-  return { 件数: moved.length, 一覧: moved };
+  return { 件数: moved.length, 一覧: moved, 残り: left };
 }
 
 /**
@@ -1213,7 +1244,7 @@ function rangePrefix_(range) {
 
 /** 説明欄から容器サイズ。品名が読めなければ容器No. の頭から。分からなければ 0 */
 function sizeFromInfo_(info, prefixKg) {
-  return sizeFromItem_(info[INFO_ITEM]) ||
+  return Number(info[INFO_SIZE]) || sizeFromItem_(info[INFO_ITEM]) ||
          (prefixKg && prefixKg[rangePrefix_(info[INFO_RANGE])]) || 0;
 }
 
