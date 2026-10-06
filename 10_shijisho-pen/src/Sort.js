@@ -94,6 +94,8 @@ function runSort() {
   }
 
   try {
+    // 時間の予算は実行の始まりから数える(前の片付けで使った時間も含める)
+    sortStarted_ = Date.now();
     clearContinueTrigger_();
 
     // 出荷実績の取り込み(版ごとに1回だけ)
@@ -175,7 +177,7 @@ function targetMonths_() {
  * フォルダが無い月は黙って飛ばす(先の月はまだ作られていないことがある)。
  */
 function sortMonths_(months, max) {
-  sortStarted_ = Date.now();
+  if (!sortStarted_) sortStarted_ = Date.now();
   revIndex_ = buildRevisionIndex_(months);
 
   var all = {
@@ -1199,7 +1201,7 @@ function sortCheckedFiles_() {
         if (!learned) learned = learnPrefixKg_();
         var kg = sizeFromInfo_(info, learned);
         if (!kg) {
-          if (Date.now() - started > CHECKED_OCR_BUDGET_MS) { left++; return; }
+          if (Date.now() - started > CHECKED_OCR_BUDGET_MS || overBudget_()) { left++; return; }
           try { kg = extractSizeKg_(readPdfText_(DriveApp.getFileById(f.id))); } catch (e) { kg = 0; }
         }
         // 決まったサイズを説明欄に残す(作業指示一覧でも使う)。読めなかったら印を付ける
@@ -1403,8 +1405,10 @@ function moveOverdueCopies_() {
  * 振り分けのときにファイルの説明へ得意先コードを残してあるので、
  * OCR をやり直さずに済む。表の B列に会社名が書き足されたり直されたり
  * したら、次の実行でここが名前をそろえる。
- * 説明にコードが無いコピー(この仕組みより前に作ったもの)は触らない。
- * 容器種類別と 要確認 の両方を見る。
+ * 説明にコードが無いものは、ファイル名の会社名をマスタの以前の名前から引く。
+ * チェック完了で引けないものは PDF を読み直してコードを取る(1回1分まで)。
+ * 容器種類別・要確認・チェック完了(2か月前〜2か月先の月)を見る。
+ * 会社名の後ろの _書込・_2 は残す。
  */
 function renameCopiesFromMaster_() {
   loadCustomerMaster_();
@@ -1423,41 +1427,67 @@ function renameCopiesFromMaster_() {
       else if (byName[n] !== null && lookupCustomer_(byName[n]) !== r[1]) byName[n] = null;
     });
   });
-  var folders = [];
+  // 容器種類別・要確認のコピーと、チェック完了のファイルを見る
+  var places = {};
   var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
-  Object.keys(index).forEach(function (kg) { folders.push(index[kg]); });
-  folders.push({ id: OVERDUE_FOLDER_ID, path: '要確認' });
+  Object.keys(index).forEach(function (kg) { places[index[kg].id] = { path: index[kg].path, done: false }; });
+  places[OVERDUE_FOLDER_ID] = { path: '要確認', done: false };
+  checkedFolders_().forEach(function (fo) {
+    places[fo.id] = { path: 'チェック完了/' + fo.m + '月' + (fo.name ? '/' + fo.name : ''), done: true };
+  });
 
-  var renamed = [];
+  var renamed = [], started = Date.now();
 
-  folders.forEach(function (fo) {
-    var it = DriveApp.getFolderById(fo.id).getFiles();
-    while (it.hasNext()) {
-      var f = it.next(), name = f.getName();
+  listPdfMetaIn_(Object.keys(places)).forEach(function (f) {
+    var pl = places[(f.parents || []).filter(function (p) { return places[p]; })[0]];
+    if (!pl) return;
+    var name = f.name;
+    var m = name.match(/^(\d{2}\.\d{2}\.\d{2}_[^_]+_)/);   // 26.09.25_26-60749-0(1)_
+    if (!m) return;
 
-      var m = name.match(/^(\d{2}\.\d{2}\.\d{2}_[^_]+_)/);   // 26.09.25_26-60749-0(1)_
-      if (!m) continue;
+    // 会社名の後ろの _書込 や _2(同じ名前を避けた印)は残す
+    var rest = name.slice(m[1].length).replace(/\.pdf$/i, '');
+    var sm = rest.match(/(_書込(?:_\d+)?|_\d+)$/);
+    var suffix = sm ? sm[1] : '';
+    var shown = suffix ? rest.slice(0, -suffix.length) : rest;
 
-      var info = readInfo_(f.getDescription()), code = info[INFO_CODE];
+    var info = readInfo_(f.description), code = info[INFO_CODE];
+    if (!code) code = byName[shown];
+    if (!code && pl.done && !info._コード読めず) {
+      // チェック完了の古いものは説明欄が無いことがある。読み直してコードを取る(1回1分まで)
+      if (Date.now() - started > RENAME_OCR_BUDGET_MS || overBudget_()) return;
+      try { code = extractCustomerCode_(readPdfText_(DriveApp.getFileById(f.id))); } catch (e) { code = ''; }
       if (!code) {
-        code = byName[name.slice(m[1].length).replace(/\.pdf$/i, '')];
-        if (!code) continue;                       // 名前からも決められない
-        info[INFO_CODE] = code;
-        f.setDescription(writeInfo_(info));        // 次からはコードで引ける
+        Drive.Files.update({ description: writeInfo_(info) + '\n_コード読めず:1' }, f.id, null,
+                           { supportsAllDrives: true });
+        return;
       }
-
-      var to = lookupCustomer_(code);
-      if (!to) continue;                           // まだ会社名が書かれていない
-
-      var want = copyName_(m[1], to);
-      if (want === name) continue;
-
-      f.setName(want);
-      renamed.push(fo.path + '/' + name + '  →  ' + want);
     }
+    if (!code) return;                               // 名前からも決められない
+
+    var meta = {};
+    if (info[INFO_CODE] !== code) {
+      info[INFO_CODE] = code;
+      meta.description = writeInfo_(info);           // 次からはコードで引ける
+    }
+
+    var to = lookupCustomer_(code);
+    var want = to ? copyName_(m[1], to).replace(/\.pdf$/i, suffix + '.pdf') : name;
+    if (want !== name) meta.name = want;
+    if (!Object.keys(meta).length) return;
+
+    Drive.Files.update(meta, f.id, null, { supportsAllDrives: true });
+    if (meta.name) renamed.push(pl.path + '/' + name + '  →  ' + want);
   });
 
   return { 件数: renamed.length, 一覧: renamed };
+}
+
+var RENAME_OCR_BUDGET_MS = 60 * 1000;
+
+/** 実行全体の時間の予算を使い切ったか(GAS は1回6分で止められる) */
+function overBudget_() {
+  return sortStarted_ > 0 && Date.now() - sortStarted_ > SORT_TIME_BUDGET_MS;
 }
 
 /**

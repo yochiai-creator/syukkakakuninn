@@ -242,7 +242,7 @@ syukkakakuninn/
    `trashCheckedLeftovers_` … チェック完了済みなのに容器種類別・要確認に残っているコピーをゴミ箱へ(途中保存と `_書込` は触らない)
 6. `moveOverdueCopies_` … 出荷日が昨日以前のコピーを要確認へ
 7. `sortMonths_` … 当月から2か月先までの元フォルダを見て、まだのものを OCR してコピー(時間の予算は5分)
-8. `renameCopiesFromMaster_` … マスタの会社名に合わせてコピーの名前を直す
+8. `renameCopiesFromMaster_` … マスタの会社名に合わせて、コピーとチェック完了の名前を直す(`_書込`・`_2` は残す。説明欄にコードが無いチェック完了は PDF を読み直してコードを取る、1回1分まで)
 9. `markSavedCopies_` … 印の無い上書き済みコピーに途中保存の印
 10. `appendUnknownCustomers_` … マスタに無い得意先コードを表に足す(会社名は空欄)
 11. `fillCopyInfo_` … 説明欄に数量などが無いコピーを残り時間で読み足す
