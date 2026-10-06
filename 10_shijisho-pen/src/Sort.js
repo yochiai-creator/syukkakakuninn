@@ -111,7 +111,7 @@ function runSort() {
     // 出荷日を過ぎたものが容器種類別に残らないように。
     var early = {};
     var sorted = step_(sortCheckedFiles_);
-    put_(early, 'チェック完了をサイズ別に分けた', sorted);
+    put_(early, 'チェック完了を並べ直した', sorted);
     if (sorted && sorted.残り) early.チェック完了の読み直し残り = sorted.残り;
     put_(early, 'チェック済みの残りを片付けた', step_(trashCheckedLeftovers_));
     if (SORT_MOVE_OVERDUE) put_(early, '要確認へ移した', step_(moveOverdueCopies_));
@@ -358,8 +358,8 @@ function finishResult_(result) {
   if (result.数量などを読み足した > 0) {
     memo.push('作業指示一覧のために、' + result.数量などを読み足した + ' 件のコピーから数量などを読み取りました。');
   }
-  if (result.チェック完了をサイズ別に分けた > 0) {
-    memo.push('チェック完了の月フォルダにあった ' + result.チェック完了をサイズ別に分けた + ' 件を、容器サイズのフォルダへ分けました。');
+  if (result.チェック完了を並べ直した > 0) {
+    memo.push('チェック完了 ' + result.チェック完了を並べ直した + ' 件を、出荷日の月・容器サイズのフォルダへ並べ直しました。');
   }
   if (result.チェック済みの残りを片付けた > 0) {
     memo.push('チェック完了済みなのに残っていたコピー ' + result.チェック済みの残りを片付けた +
@@ -1138,78 +1138,88 @@ function checkedFolders_() {
 }
 
 function checkedFoldersNow_() {
+  // チェック完了は出荷日の月に入る。先の月の分を前もってチェックすることも
+  // あるので、DONE_LOOKBACK_MONTHS か月前から SORT_MONTHS_AHEAD か月先まで見る
   var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
   var now = new Date();
   var y = Number(Utilities.formatDate(now, tz, 'yyyy'));
   var m = Number(Utilities.formatDate(now, tz, 'M'));
   var out = [];
-  for (var i = 0; i < DONE_LOOKBACK_MONTHS; i++) {
-    var d = new Date(y, m - 1 - i, 1);
+  for (var i = -(DONE_LOOKBACK_MONTHS - 1); i <= SORT_MONTHS_AHEAD; i++) {
+    var d = new Date(y, m - 1 + i, 1);
     var yid = findChildFolder_(DONE_FOLDER_ID, d.getFullYear() + '年');
     var mid = yid && findChildFolder_(yid, (d.getMonth() + 1) + '月');
     if (!mid) continue;
-    out.push({ id: mid, kg: 0 });
+    var ym = { y: d.getFullYear(), m: d.getMonth() + 1 };
+    out.push({ id: mid, kg: 0, kind: 'month', name: '', monthId: mid, y: ym.y, m: ym.m });
     var it = DriveApp.getFolderById(mid).getFolders();
     while (it.hasNext()) {
-      var sub = it.next();
-      out.push({ id: sub.getId(), kg: folderSizeKg_(sub.getName()) });
+      var sub = it.next(), nm = sub.getName(), kg = folderSizeKg_(nm);
+      out.push({ id: sub.getId(), kg: kg, kind: kg ? 'size' : 'other', name: nm, monthId: mid, y: ym.y, m: ym.m });
     }
   }
   return out;
 }
 
 /**
- * チェック完了のうち、まだ容器サイズで分けていないものを分ける(今月と先月)。
- *   - 月フォルダ直下にあるもの(サイズで分ける前に完了したもの)
- *   - 「その他」にあるもの(説明欄からサイズが分からなかったもの)
- * サイズは 説明欄(容器サイズ・品名・容器No. の頭)→ PDF を読み直す、の順で決める。
+ * チェック完了を「出荷日の月 / 容器サイズ」のフォルダへ並べ直す。
+ *   - 月が出荷日と違うもの(以前はチェックした月に入れていた)は出荷日の月へ
+ *   - 月フォルダ直下・「その他」にあるものは容器サイズのフォルダへ
+ * サイズは 今いるサイズのフォルダ → 説明欄(容器サイズ・品名・容器No. の頭)
+ * → PDF を読み直す、の順で決める。
  * 読み直しは1件17秒ほどかかるので、1回の実行で2分まで。残りは次の実行で。
  * 読み直しても分からなかったものは「その他」に残し、印を付けて読み直さない。
  */
 var CHECKED_OCR_BUDGET_MS = 2 * 60 * 1000;
 
 function sortCheckedFiles_() {
-  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
-  var now = new Date();
-  var y = Number(Utilities.formatDate(now, tz, 'yyyy'));
-  var m = Number(Utilities.formatDate(now, tz, 'M'));
   var started = Date.now();
   var moved = [], left = 0, learned = null;
 
-  for (var i = 0; i < 2; i++) {
-    var d = new Date(y, m - 1 - i, 1);
-    var yid = findChildFolder_(DONE_FOLDER_ID, d.getFullYear() + '年');
-    var mid = yid && findChildFolder_(yid, (d.getMonth() + 1) + '月');
-    if (!mid) continue;
-    var other = findChildFolder_(mid, 'その他');
-    var todo = listPdfMeta_(mid).map(function (f) { f.inOther = false; return f; })
-      .concat(other ? listPdfMeta_(other).map(function (f) { f.inOther = true; return f; }) : []);
+  var folders = checkedFoldersNow_();
+  var byId = {};
+  folders.forEach(function (fo) { byId[fo.id] = fo; });
 
-    todo.forEach(function (f) {
-      if (!/^\d{2}\.\d{2}\.\d{2}_/.test(f.name)) return;
-      var inOther = f.inOther;
-      var info = readInfo_(f.description);
-      if (inOther && info._サイズ読めず) return;          // 前に読み直しても分からなかった
+  listPdfMetaIn_(Object.keys(byId)).forEach(function (f) {
+    var name = f.name.match(/^(\d{2})\.(\d{2})\.\d{2}_/);
+    if (!name) return;
+    var fo = byId[(f.parents || []).filter(function (p) { return byId[p]; })[0]];
+    if (!fo) return;
 
-      if (!learned) learned = learnPrefixKg_();
-      var kg = sizeFromInfo_(info, learned);
+    var want = { y: 2000 + Number(name[1]), m: Number(name[2]) };
+    var rightMonth = want.y === fo.y && want.m === fo.m;
+    var info = readInfo_(f.description);
 
-      if (!kg) {
-        if (Date.now() - started > CHECKED_OCR_BUDGET_MS) { left++; return; }
-        try { kg = extractSizeKg_(readPdfText_(DriveApp.getFileById(f.id))); } catch (e) { kg = 0; }
+    // サイズ: いまサイズのフォルダにあればそのまま
+    var size = fo.kind === 'size' ? fo.name : '';
+    if (!size) {
+      if (fo.kind === 'other' && info._サイズ読めず) {
+        size = 'その他';                                  // 前に読み直しても分からなかった
+      } else {
+        if (!learned) learned = learnPrefixKg_();
+        var kg = sizeFromInfo_(info, learned);
+        if (!kg) {
+          if (Date.now() - started > CHECKED_OCR_BUDGET_MS) { left++; return; }
+          try { kg = extractSizeKg_(readPdfText_(DriveApp.getFileById(f.id))); } catch (e) { kg = 0; }
+        }
+        // 決まったサイズを説明欄に残す(作業指示一覧でも使う)。読めなかったら印を付ける
+        if (kg) info[INFO_SIZE] = String(kg);
+        Drive.Files.update({ description: writeInfo_(info) + (kg ? '' : '\n_サイズ読めず:1') },
+                           f.id, null, { supportsAllDrives: true });
+        size = kg ? sizeFolderName_(kg) : 'その他';
       }
+    }
 
-      // 決まったサイズを説明欄に残す(作業指示一覧でも使う)。読めなかったら印を付ける
-      if (kg) info[INFO_SIZE] = String(kg);
-      var desc = writeInfo_(info) + (kg ? '' : '\n_サイズ読めず:1');
-      Drive.Files.update({ description: desc }, f.id, null, { supportsAllDrives: true });
+    if (rightMonth && fo.kind !== 'month' && fo.name === size) return;   // もう正しい場所
 
-      var size = kg ? sizeFolderName_(kg) : 'その他';
-      if (inOther && size === 'その他') return;
-      DriveApp.getFileById(f.id).moveTo(DriveApp.getFolderById(cachedChildFolder_(mid, size)));
-      moved.push((d.getMonth() + 1) + '月/' + size + '/' + f.name);
-    });
-  }
+    var monthId = rightMonth ? fo.monthId
+      : cachedChildFolder_(cachedChildFolder_(DONE_FOLDER_ID, want.y + '年'), want.m + '月');
+    var dest = cachedChildFolder_(monthId, size);
+    if (dest === fo.id) return;
+    DriveApp.getFileById(f.id).moveTo(DriveApp.getFolderById(dest));
+    moved.push(want.m + '月/' + size + '/' + f.name + (rightMonth ? '' : '  (' + fo.m + '月から)'));
+  });
+
   return { 件数: moved.length, 一覧: moved, 残り: left };
 }
 

@@ -826,10 +826,10 @@ function savePdf(req) {
  * コピーに失敗した場合、元ファイルには一切触れない。
  */
 function saveDone_(fileId, original, blob) {
-  var now = new Date();
-  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
-  var year  = Utilities.formatDate(now, tz, 'yyyy') + '年';
-  var month = Number(Utilities.formatDate(now, tz, 'M')) + '月';
+  // 月は出荷日の月(ファイル名の 26.10.01_ から)。名前から読めなければ今月
+  var ym = doneMonthOf_(original.name);
+  var year  = ym.y + '年';
+  var month = ym.m + '月';
 
   // 月フォルダの中を容器サイズで分ける。1つのフォルダに何百件も溜まると、
   // 保存(同名の確認)も、作業指示一覧・振り分けの読み込みも遅くなるため。
@@ -920,6 +920,14 @@ function folderName_(id) {
     cache.put('fname:' + id, name, 6 * 60 * 60);
   }
   return name;
+}
+
+/** チェック完了で入れる月。ファイル名の出荷日 26.10.01_ から。読めなければ今月 */
+function doneMonthOf_(name) {
+  var m = String(name).match(/^(\d{2})\.(\d{2})\.\d{2}_/);
+  if (m) return { y: 2000 + Number(m[1]), m: Number(m[2]) };
+  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo', now = new Date();
+  return { y: Number(Utilities.formatDate(now, tz, 'yyyy')), m: Number(Utilities.formatDate(now, tz, 'M')) };
 }
 
 /** チェック完了に置く名前。_書込 と、その後ろの _2 などを外す。 */
