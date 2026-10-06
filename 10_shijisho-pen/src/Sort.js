@@ -810,13 +810,15 @@ function codeKey_(code) {
 }
 
 /**
- * OCR は O と 0、I と 1 を取り違える(B070 を BO70 と読む)ので、数字側に
+ * OCR は O と 0、I と 1、G と 6 を取り違える(B070 を BO70、G899 を 6899 と読む)ので、数字側に
  * 寄せたキー。ただし I774 と 1774 のように本当に別のコードもあるため、
  * これはそのままのコードで見つからなかったときの控えにだけ使う。
  */
 function fuzzyKey_(code) {
   code = String(code || '').trim().toUpperCase();
-  if (/\d/.test(code)) code = code.replace(/O/g, '0').replace(/I/g, '1');
+  // OCR の読み違いやすい字をそろえる(O↔0、I↔1、G↔6)。完全一致で見つからず、
+  // この形で1社だけに当たるときにしか使わない
+  if (/\d/.test(code)) code = code.replace(/O/g, '0').replace(/I/g, '1').replace(/G/g, '6');
   return codeKey_(code);
 }
 
