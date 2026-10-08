@@ -869,20 +869,35 @@ function pickCustomerByName_(code, dest) {
   return code;
 }
 
-/** マスタの名前のうち、OCR の出荷先に出てくる2文字の並びの割合(0〜1) */
+/**
+ * マスタの名前が OCR の出荷先にどれだけ出てくるか(0〜1)。
+ * 2文字の並びの割合と、1文字ずつの割合(×0.8)の大きい方。
+ * OCR はカタカナを形の似た漢字・記号に読み違える(エネロ → 工口)ので、
+ * 比べる前にそろえる。
+ */
+var OCR_LOOKALIKE = {
+  '工': 'エ', '口': 'ロ', '力': 'カ', '夕': 'タ', '卜': 'ト', '八': 'ハ', '儿': 'ル',
+  '二': 'ニ', '三': 'ミ', '一': 'ー', '入': 'ス', '乂': 'メ', '才': 'オ', '千': 'チ',
+  '于': 'テ', '刀': 'フ', '匕': 'ヒ', '卩': 'P', 'ㄨ': 'メ', 'ㄦ': 'ル', 'ㄌ': 'ム'
+};
 function nameScore_(name, dest) {
   var norm = function (s) {
-    return toHalfAlnum_(s).replace(/株式会社|有限会社|\(株\)|（株）|㈱|\(有\)|㈲/g, '')
+    s = toHalfAlnum_(s).replace(/株式会社|有限会社|\(株\)|（株）|㈱|\(有\)|㈲/g, '')
       .replace(/[\s　・,.、。()（）]/g, '');
+    return s.replace(/./g, function (c) { return OCR_LOOKALIKE[c] || c; });
   };
   var a = norm(name), b = norm(dest);
-  if (a.length < 2 || !b) return 0;
-  var hit = 0, total = 0;
-  for (var i = 0; i < a.length - 1; i++) {
-    total++;
-    if (b.indexOf(a.substr(i, 2)) >= 0) hit++;
+  if (!a || !b) return 0;
+  var hit2 = 0, total2 = 0, hit1 = 0;
+  for (var i = 0; i < a.length; i++) {
+    if (b.indexOf(a.charAt(i)) >= 0) hit1++;
+    if (i < a.length - 1) {
+      total2++;
+      if (b.indexOf(a.substr(i, 2)) >= 0) hit2++;
+    }
   }
-  return total ? hit / total : 0;
+  var bi = total2 ? hit2 / total2 : 0;
+  return Math.max(bi, 0.8 * hit1 / a.length);
 }
 
 /** ファイル名の日付を見て、出荷日が当日以前かどうか。読めなければ対象扱い。 */
