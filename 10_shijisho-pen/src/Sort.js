@@ -500,6 +500,12 @@ function sortOne_(file, sizeFolders, doneNames, result) {
   if (!size) throw new Error('品名から容器サイズを読めません');
 
   var dest = sizeFolders[size];
+  if (!dest && size === BULK_KG) {
+    // バルクのフォルダが無ければ作る
+    var bid = childFolder_(SORT_DEST_ROOT_ID, BULK_FOLDER);
+    dest = sizeFolders[size] = { id: bid, path: BULK_FOLDER };
+    try { CacheService.getScriptCache().remove('sizeIndex:' + SORT_DEST_ROOT_ID); } catch (e) {}
+  }
   if (!dest) throw new Error(size + 'kg の振り分け先フォルダがありません');
 
   // 出荷先はマスタを優先する。OCR の読みは会社名が崩れるため、
@@ -530,7 +536,7 @@ function sortOne_(file, sizeFolders, doneNames, result) {
   // 数量などはアプリの作業指示一覧(簡易版)に使う。
   var info = extractOrderInfo_(text);
   if (code) info[INFO_CODE] = code;
-  info[INFO_SIZE] = String(size);   // 振り分けで決めたサイズ。チェック完了の仕分けに使う
+  info[INFO_SIZE] = sizeLabel_(size);   // 振り分けで決めたサイズ。チェック完了の仕分けに使う
   if (destRead) info[INFO_DEST] = destRead.slice(0, 40);
 
   // 訂正版: 前の版を説明欄で結び、まだチェック前の前の版のコピーはゴミ箱へ
@@ -1050,7 +1056,23 @@ var LITER_TO_KG = { 19: 8, 24: 10, 47: 20, 71: 30, 118: 50 };
  * kg を読めなかった場合だけ、容量(◯◯L)から引く。OCR は 50kg を
  * 読み落とすことがあるが、118L の方は残っていることが多い。
  */
+// バルク貯槽。容器サイズの代わりにこの値で扱う(フォルダは ◆容器種類別/バルク)
+var BULK_KG = 9999;
+var BULK_FOLDER = 'バルク';
+
+/** バルク貯槽の指図書か(品名「7000Lit バルク貯槽」など。OCR でバルクは崩れやすいので貯槽で見る) */
+function isBulkText_(text) {
+  var t = toHalfAlnum_(text);
+  return /貯槽/.test(t) || /\d{4,5}\s*Lit/i.test(t);
+}
+
+/** 説明欄に書くサイズ: 50 / バルク */
+function sizeLabel_(kg) {
+  return kg === BULK_KG ? BULK_FOLDER : String(kg);
+}
+
 function extractSizeKg_(text) {
+  if (isBulkText_(text)) return BULK_KG;
   var kgCounts = countNumbers_(text, /(\d{1,3})\s*kg/gi);
 
   var kg = onlyOne_(kgCounts);
@@ -1175,6 +1197,7 @@ function addSizeFolders_(parent, prefix, index) {
 
 /** '30Ｋ' '８Ｋ' → 30 / 8。容器サイズを表さない名前は 0。 */
 function folderSizeKg_(name) {
+  if (/バルク/.test(String(name))) return BULK_KG;
   var half = String(name).replace(/[０-９]/g, function (c) {
     return String.fromCharCode(c.charCodeAt(0) - 0xFEE0);
   });
@@ -1285,7 +1308,7 @@ function sortCheckedFiles_() {
           try { kg = extractSizeKg_(readPdfText_(DriveApp.getFileById(f.id))); } catch (e) { kg = 0; }
         }
         // 決まったサイズを説明欄に残す(作業指示一覧でも使う)。読めなかったら印を付ける
-        if (kg) info[INFO_SIZE] = String(kg);
+        if (kg) info[INFO_SIZE] = sizeLabel_(kg);
         Drive.Files.update({ description: writeInfo_(info) + (kg ? '' : '\n_サイズ読めず:1') },
                            f.id, null, { supportsAllDrives: true });
         size = kg ? sizeFolderName_(kg) : 'その他';
@@ -1336,6 +1359,7 @@ function rangePrefix_(range) {
 
 /** 説明欄から容器サイズ。品名が読めなければ容器No. の頭から。分からなければ 0 */
 function sizeFromInfo_(info, prefixKg) {
+  if (info[INFO_SIZE] === BULK_FOLDER) return BULK_KG;
   return Number(info[INFO_SIZE]) || sizeFromItem_(info[INFO_ITEM]) ||
          (prefixKg && prefixKg[rangePrefix_(info[INFO_RANGE])]) || 0;
 }

@@ -408,6 +408,7 @@ function workSheet(dayKey) {
 
 /** 品名 '新軽量47L (20kg)' から 20。読めなければ 0 */
 function sizeFromItem_(item) {
+  if (/貯槽/.test(String(item || ''))) return BULK_KG;
   var m = String(item || '').match(/(\d{1,3})\s*kg/i);
   if (m) return Number(m[1]);
   m = String(item || '').match(/(\d{1,3})\s*L/);
@@ -890,6 +891,7 @@ function doneSizeName_(original) {
 
 /** 20 → '20Ｋ'、8 → '８Ｋ'。◆容器種類別 にある名前に合わせる */
 function sizeFolderName_(kg) {
+  if (kg === BULK_KG) return BULK_FOLDER;
   var index = buildSizeIndex_(getFolderId_());
   if (index[kg]) return index[kg].path.split('/').pop();
   return kg + 'Ｋ';

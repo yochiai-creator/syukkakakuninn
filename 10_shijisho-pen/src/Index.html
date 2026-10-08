@@ -988,7 +988,7 @@ function renderWorkList(res){
       var q=same.reduce(function(a,x){ return a+(Number(x.qty)||0); }, 0);
       var g=document.createElement("tr"); g.className="wg";
       var td=document.createElement("td"); td.colSpan=7;
-      td.textContent = r.kg ? r.kg+"kg" : "サイズ不明";
+      td.textContent = r.kg===9999 ? "バルク" : r.kg ? r.kg+"kg" : "サイズ不明";
       var miss=same.filter(function(x){ return !x.qty; }).length;
       var s2=document.createElement("span");
       s2.textContent=same.length+" 件 · "+q+" 本"+(miss ? "(数量不明 "+miss+")" : "");
