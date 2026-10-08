@@ -505,6 +505,9 @@ function sortOne_(file, sizeFolders, doneNames, result) {
   // 出荷先はマスタを優先する。OCR の読みは会社名が崩れるため、
   // 得意先コードで引き当てて正しい表記に置き換える。
   var code = extractCustomerCode_(text);
+  // 1774 と I774 のように、読み違えると別の得意先になるコードは出荷先の名前で選ぶ
+  var destRead = extractDestination_(text);
+  code = pickCustomerByName_(code, destRead);
   var to = lookupCustomer_(code);
 
   if (!to) {
@@ -528,6 +531,7 @@ function sortOne_(file, sizeFolders, doneNames, result) {
   var info = extractOrderInfo_(text);
   if (code) info[INFO_CODE] = code;
   info[INFO_SIZE] = String(size);   // 振り分けで決めたサイズ。チェック完了の仕分けに使う
+  if (destRead) info[INFO_DEST] = destRead.slice(0, 40);
 
   // 訂正版: 前の版を説明欄で結び、まだチェック前の前の版のコピーはゴミ箱へ
   // (ページはアプリで最初に開いたときにつなぐ。ゴミ箱でも30日は読める)
@@ -565,12 +569,13 @@ function copyName_(prefix, to) {
  * 以前のコピーは「得意先コード:5200」の1行だけ。そのままでも読める。
  */
 var INFO_CODE = '得意先コード', INFO_QTY = '数量', INFO_RANGE = '容器No',
-    INFO_TIME = '時間指定', INFO_ITEM = '品名', INFO_SIZE = '容器サイズ';
+    INFO_TIME = '時間指定', INFO_ITEM = '品名', INFO_SIZE = '容器サイズ',
+    INFO_DEST = '出荷先の読み';     // OCR で読んだ出荷先(似たコードの見分けに使う)
 // 訂正版のとき: 前の版のファイル ID・出荷日・状態(未/途中保存/完了)、
 // アプリで前の版のページをつないだら 結合:済
 var INFO_PREV = '前の版', INFO_PREV_DATE = '前の版の出荷日', INFO_PREV_STATE = '前の版の状態',
     INFO_MERGED = '結合';
-var INFO_KEYS = [INFO_CODE, INFO_QTY, INFO_RANGE, INFO_TIME, INFO_ITEM, INFO_SIZE,
+var INFO_KEYS = [INFO_CODE, INFO_QTY, INFO_RANGE, INFO_TIME, INFO_ITEM, INFO_SIZE, INFO_DEST,
                  INFO_PREV, INFO_PREV_DATE, INFO_PREV_STATE, INFO_MERGED];
 
 function readInfo_(desc) {
@@ -583,8 +588,10 @@ function readInfo_(desc) {
 }
 
 function writeInfo_(info) {
-  return INFO_KEYS.filter(function (k) { return info[k]; })
-    .map(function (k) { return k + ':' + info[k]; }).join('\n');
+  // _読めず などの印(先頭が _ の行)も残す
+  var keys = INFO_KEYS.filter(function (k) { return info[k]; })
+    .concat(Object.keys(info).filter(function (k) { return k.charAt(0) === '_' && info[k]; }));
+  return keys.map(function (k) { return k + ':' + info[k]; }).join('\n');
 }
 
 /**
@@ -820,6 +827,62 @@ function fuzzyKey_(code) {
   // この形で1社だけに当たるときにしか使わない
   if (/\d/.test(code)) code = code.replace(/O/g, '0').replace(/I/g, '1').replace(/G/g, '6');
   return codeKey_(code);
+}
+
+/**
+ * 似たコードの見分け。マスタに、読み替えると同じ形になるコードが2つ以上
+ * ある(1774 と I774、6757 と G757 など)とき、OCR で読んだ出荷先の名前に
+ * よく合う方を選ぶ。はっきり差が付かなければ元のコードのまま。
+ */
+var customerNamesCache_ = null;
+function customerNames_() {
+  if (customerNamesCache_) return customerNamesCache_;
+  var names = {}, twins = {};
+  readMasterRows_().forEach(function (r) {
+    var k = codeKey_(r[0]);
+    if (!k || !r[1]) return;
+    names[k] = [r[1]].concat(String(r[2] || '').split(OLD_NAME_SEP))
+      .map(function (n) { return String(n).trim(); }).filter(Boolean);
+    var f = fuzzyKey_(r[0]);
+    twins[f] = twins[f] || [];
+    if (twins[f].indexOf(k) < 0) twins[f].push(k);
+  });
+  customerNamesCache_ = { names: names, twins: twins };
+  return customerNamesCache_;
+}
+
+function hasTwinCode_(code) {
+  return (customerNames_().twins[fuzzyKey_(code)] || []).length > 1;
+}
+
+function pickCustomerByName_(code, dest) {
+  if (!code || !dest) return code;
+  var c = customerNames_();
+  var list = c.twins[fuzzyKey_(code)] || [];
+  if (list.length < 2) return code;
+  var scored = list.map(function (k) {
+    var best = 0;
+    (c.names[k] || []).forEach(function (n) { best = Math.max(best, nameScore_(n, dest)); });
+    return { k: k, s: best };
+  }).sort(function (a, b) { return b.s - a.s; });
+  if (scored[0].s >= 0.5 && scored[0].s - scored[1].s >= 0.25) return scored[0].k;
+  return code;
+}
+
+/** マスタの名前のうち、OCR の出荷先に出てくる2文字の並びの割合(0〜1) */
+function nameScore_(name, dest) {
+  var norm = function (s) {
+    return toHalfAlnum_(s).replace(/株式会社|有限会社|\(株\)|（株）|㈱|\(有\)|㈲/g, '')
+      .replace(/[\s　・,.、。()（）]/g, '');
+  };
+  var a = norm(name), b = norm(dest);
+  if (a.length < 2 || !b) return 0;
+  var hit = 0, total = 0;
+  for (var i = 0; i < a.length - 1; i++) {
+    total++;
+    if (b.indexOf(a.substr(i, 2)) >= 0) hit++;
+  }
+  return total ? hit / total : 0;
 }
 
 /** ファイル名の日付を見て、出荷日が当日以前かどうか。読めなければ対象扱い。 */
@@ -1467,8 +1530,23 @@ function renameCopiesFromMaster_() {
     }
     if (!code) return;                               // 名前からも決められない
 
+    var changed = info[INFO_CODE] !== code;
+
+    // 似たコードが2つ以上ある(1774 と I774 など)ときは、出荷先の名前で選び直す
+    if (hasTwinCode_(code)) {
+      var dest = info[INFO_DEST];
+      if (!dest && !info._出荷先読めず && Date.now() - started <= RENAME_OCR_BUDGET_MS && !overBudget_()) {
+        try { dest = extractDestination_(readPdfText_(DriveApp.getFileById(f.id))); } catch (e) { dest = ''; }
+        if (dest) info[INFO_DEST] = dest.slice(0, 40);
+        else info._出荷先読めず = '1';
+        changed = true;
+      }
+      var picked = pickCustomerByName_(code, dest);
+      if (picked !== code) { code = picked; changed = true; }
+    }
+
     var meta = {};
-    if (info[INFO_CODE] !== code) {
+    if (changed) {
       info[INFO_CODE] = code;
       meta.description = writeInfo_(info);           // 次からはコードで引ける
     }
