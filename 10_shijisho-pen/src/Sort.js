@@ -871,7 +871,8 @@ function pickCustomerByName_(code, dest) {
     (c.names[k] || []).forEach(function (n) { best = Math.max(best, nameScore_(n, dest)); });
     return { k: k, s: best };
   }).sort(function (a, b) { return b.s - a.s; });
-  if (scored[0].s >= 0.5 && scored[0].s - scored[1].s >= 0.25) return scored[0].k;
+  // OCR の名前は崩れやすいので、合う割合は低めでも、もう一方との差がはっきりしていれば選ぶ
+  if (scored[0].s >= 0.3 && scored[0].s - scored[1].s >= 0.25) return scored[0].k;
   return code;
 }
 
@@ -884,7 +885,7 @@ function pickCustomerByName_(code, dest) {
 var OCR_LOOKALIKE = {
   '工': 'エ', '口': 'ロ', '力': 'カ', '夕': 'タ', '卜': 'ト', '八': 'ハ', '儿': 'ル',
   '二': 'ニ', '三': 'ミ', '一': 'ー', '入': 'ス', '乂': 'メ', '才': 'オ', '千': 'チ',
-  '于': 'テ', '刀': 'フ', '匕': 'ヒ', '卩': 'P', 'ㄨ': 'メ', 'ㄦ': 'ル', 'ㄌ': 'ム'
+  '于': 'テ', '刀': 'フ', '匕': 'ヒ', '卩': 'P', 'ㄨ': 'メ', 'ㄦ': 'ル', 'ㄌ': 'ム', 'ㄧ': 'ー'
 };
 function nameScore_(name, dest) {
   var norm = function (s) {
