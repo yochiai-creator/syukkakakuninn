@@ -344,7 +344,7 @@ function finishResult_(result) {
     memo.push('毎朝の自動実行が入っていなかったので入れました。明日から朝 ' + SORT_DAILY_HOUR + ' 時ごろに回ります。');
   }
   if (result.出荷実績の取り込み > 0) {
-    memo.push('出荷実績から得意先マスタを ' + result.出荷実績の取り込み + ' 行そろえました(会社名は略称に)。');
+    memo.push('出荷実績から得意先マスタを ' + result.出荷実績の取り込み + ' 行足したり直したりしました(手で直した会社名はそのまま)。');
   }
   if (result.途中保存の目印を付けた > 0) {
     memo.push('前から上書きしてあった ' + result.途中保存の目印を付けた + ' 件に、途中保存の目印を付けました。');
@@ -709,7 +709,10 @@ function applyMasterSeed_() {
       return;
     }
     var r = rows[i];
-    if (r[1] !== name) {
+    // B列は、空欄か、前の版の略称のまま(手で直していない)ときだけ新しい略称にする。
+    // 手で直した会社名は上書きしない
+    var prev = s[4] || '';
+    if (r[1] !== name && (!r[1] || (prev && r[1] === prev))) {
       if (r[1]) r[2] = addOldName_(r[2], r[1]);
       r[1] = name;
       changed++;
