@@ -52,8 +52,12 @@ var SORT_SKIP_PAST = true;
 var SORT_MONTHS_AHEAD = 2;
 
 // 出荷日を過ぎたのに容器種類別に残っているコピーを移す先。
-// '001_【出荷】/'004_要確認
-var OVERDUE_FOLDER_ID = '1IhDSDZl8bT1x1iqLclanA213cENGIdD3';
+// '001_【出荷】/'004_要確認 の中の子フォルダ「出荷日超過」。
+// 004_要確認 は指図書の自動仕分け・欠損補完チェックの「要確認_」ファイルと共用で、
+// 直下に入れると見分けが付かなくなるため分けた(無ければ作る。IDはスクリプトプロパティに覚える)。
+var OVERDUE_PARENT_ID = '1IhDSDZl8bT1x1iqLclanA213cENGIdD3';
+var OVERDUE_CHILD_NAME = '出荷日超過';
+var PROP_OVERDUE_CHILD = 'OVERDUE_CHILD_FOLDER_ID';
 var SORT_MOVE_OVERDUE = true;
 
 // ◆チェック完了 は「チェックした月」に入る。今月から何か月さかのぼって見るか。
@@ -116,6 +120,8 @@ function runSort() {
     var sorted = step_(sortCheckedFiles_);
     put_(early, 'チェック完了を並べ直した', sorted);
     if (sorted && sorted.残り) early.チェック完了の読み直し残り = sorted.残り;
+    // 以前 004_要確認 の直下に移したコピーを、子フォルダ「出荷日超過」へ移す(済めば何もしない)
+    if (SORT_MOVE_OVERDUE) put_(early, '要確認の直下から出荷日超過へ移した', step_(migrateOverdueCopies_));
     put_(early, 'チェック済みの残りを片付けた', step_(trashCheckedLeftovers_));
     if (SORT_MOVE_OVERDUE) put_(early, '要確認へ移した', step_(moveOverdueCopies_));
 
@@ -241,7 +247,7 @@ function buildRevisionIndex_(months) {
   var places = {};
   var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
   Object.keys(index).forEach(function (kg) { places[index[kg].id] = 'copy'; });
-  places[OVERDUE_FOLDER_ID] = 'copy';
+  places[overdueFolderId_()] = 'copy';
   checkedFolders_().forEach(function (fo) { places[fo.id] = 'done'; });
   listPdfMetaIn_(Object.keys(places)).forEach(function (f) {
     var m = f.name.match(COPY);
@@ -1457,7 +1463,7 @@ function trashCheckedLeftovers_() {
   var folders = [];
   var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
   Object.keys(index).forEach(function (kg) { folders.push(index[kg]); });
-  folders.push({ id: OVERDUE_FOLDER_ID, path: '要確認' });
+  folders.push({ id: overdueFolderId_(), path: '要確認/出荷日超過' });
 
   var trashed = [];
   folders.forEach(function (fo) {
@@ -1484,7 +1490,7 @@ function alreadyCopied_(prefix, doneNames) {
 }
 
 /**
- * 出荷日を過ぎたのに容器種類別に残っているコピーを '004_要確認 へ移す。
+ * 出荷日を過ぎたのに容器種類別に残っているコピーを '004_要確認/出荷日超過 へ移す。
  *
  * チェック完了するとコピーは ◆チェック完了 へ移って元は消える。
  * つまり容器種類別に残っているものは、まだチェックしていないもの。
@@ -1553,7 +1559,7 @@ function renameCopiesFromMaster_() {
   var places = {};
   var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
   Object.keys(index).forEach(function (kg) { places[index[kg].id] = { path: index[kg].path, done: false }; });
-  places[OVERDUE_FOLDER_ID] = { path: '要確認', done: false };
+  places[overdueFolderId_()] = { path: '要確認/出荷日超過', done: false };
   checkedFolders_().forEach(function (fo) {
     places[fo.id] = { path: 'チェック完了/' + fo.m + '月' + (fo.name ? '/' + fo.name : ''), done: true };
   });
@@ -1639,7 +1645,7 @@ function markSavedCopies_() {
   var folders = [];
   var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
   Object.keys(index).forEach(function (kg) { folders.push(index[kg]); });
-  folders.push({ id: OVERDUE_FOLDER_ID, path: '要確認' });
+  folders.push({ id: overdueFolderId_(), path: '要確認/出荷日超過' });
 
   // 目印の無いコピーを集める
   var todo = [];
@@ -1700,9 +1706,39 @@ function listPdfMeta_(folderId) {
   return out;
 }
 
-/** 移す先の要確認フォルダを返す。 */
+/** 移す先(要確認/出荷日超過)のフォルダを返す。 */
 function overdueFolder_() {
-  return DriveApp.getFolderById(OVERDUE_FOLDER_ID);
+  return DriveApp.getFolderById(overdueFolderId_());
+}
+
+var OVERDUE_ID_CACHE_ = null;
+/** 要確認/出荷日超過 のフォルダID。無ければ作る。 */
+function overdueFolderId_() {
+  if (OVERDUE_ID_CACHE_) return OVERDUE_ID_CACHE_;
+  var props = PropertiesService.getScriptProperties();
+  var id = props.getProperty(PROP_OVERDUE_CHILD);
+  if (id) {
+    try { if (!DriveApp.getFolderById(id).isTrashed()) return (OVERDUE_ID_CACHE_ = id); } catch (e) {}
+  }
+  id = findChildFolder_(OVERDUE_PARENT_ID, OVERDUE_CHILD_NAME) ||
+       DriveApp.getFolderById(OVERDUE_PARENT_ID).createFolder(OVERDUE_CHILD_NAME).getId();
+  props.setProperty(PROP_OVERDUE_CHILD, id);
+  return (OVERDUE_ID_CACHE_ = id);
+}
+
+/**
+ * 以前 004_要確認 の直下へ移していた、出荷日を過ぎたコピー(26.09.25_依頼No_会社名.pdf の形)を
+ * 子フォルダ「出荷日超過」へ移す。仕分けの「要確認_…」や作業指示一覧表など、形の違うものは触らない。
+ */
+function migrateOverdueCopies_() {
+  var dest = overdueFolder_();
+  var moved = [];
+  listPdfMeta_(OVERDUE_PARENT_ID).forEach(function (f) {
+    if (!/^\d{2}\.\d{2}\.\d{2}_[^_]+_.+\.pdf$/i.test(f.name)) return;
+    DriveApp.getFileById(f.id).moveTo(dest);
+    moved.push(f.name);
+  });
+  return { 件数: moved.length, 一覧: moved };
 }
 
 /** 指定の名前の子フォルダの ID。無ければ空文字。 */

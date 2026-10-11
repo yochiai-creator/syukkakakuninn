@@ -327,7 +327,7 @@ function workSheet(dayKey) {
   var places = {};
   var index = buildSizeIndex_(getFolderId_());
   Object.keys(index).forEach(function (kg) { places[index[kg].id] = { kg: Number(kg), done: false }; });
-  places[OVERDUE_FOLDER_ID] = { kg: 0, done: false, overdue: true };
+  places[overdueFolderId_()] = { kg: 0, done: false, overdue: true };
   // 一覧に出すのは今日以降の日なので、チェック完了は出荷日が今月以降の月だけ読む
   checkedFolders_(true).forEach(function (fo) { places[fo.id] = { kg: fo.kg, done: true }; });
 
