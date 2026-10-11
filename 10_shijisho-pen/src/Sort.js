@@ -65,7 +65,8 @@ var MASTER_PARENT_ID = '1iSYAN13NXaxaLkhVdEywcJkJ0YdVULBu';
 var PROP_MASTER_SHEET = 'CUSTOMER_MASTER_ID';
 
 // 毎日の自動実行の時刻(時)。出社前に片付いているように朝にする。
-var SORT_DAILY_HOUR = 6;
+var SORT_DAILY_HOURS = [6, 12, 15];   // 毎日この時刻ごろに runSort を回す
+function dailyHoursText_() { return SORT_DAILY_HOURS.join('時・') + '時'; }
 
 // 時間切れで残りが出たときの続きの実行。1回ぶんのトリガーの ID を持つ。
 var PROP_CONTINUE_TRIGGER = 'SORT_CONTINUE_TRIGGER';
@@ -288,7 +289,9 @@ function runMonth_(yearName, monthName, max) {
   // チェック完了したものは容器種類別から消えるので、◆チェック完了 の
   // 名前も入れる。入れないと、次の実行でまっさらなコピーをもう一度作り、
   // 同じ指図書を二度チェックすることになる。
-  var doneNames = collectDestNames_(sizeFolders).concat(collectCheckedNames_());
+  // 振り分けるのは出荷日が明日以降のものだけなので、チェック完了も出荷日が
+  // 今月以降の月フォルダだけ見れば足りる(先月以前は読まない)
+  var doneNames = collectDestNames_(sizeFolders).concat(collectCheckedNames_(true));
 
   var result = { コピー: [], 済み: 0, 対象外: 0, skip: [], 未登録: [], 残り: 0, 訂正版: [] };
   var files = DriveApp.getFolderById(src).getFilesByType(MimeType.PDF);
@@ -341,7 +344,7 @@ function finishResult_(result) {
     : '対象の月は全部終わりました。');
 
   if (/^入れました/.test(result.毎朝の自動実行 || '')) {
-    memo.push('毎朝の自動実行が入っていなかったので入れました。明日から朝 ' + SORT_DAILY_HOUR + ' 時ごろに回ります。');
+    memo.push('自動実行を入れ直しました。毎日 ' + dailyHoursText_() + 'ごろに回ります。');
   }
   if (result.出荷実績の取り込み > 0) {
     memo.push('出荷実績から得意先マスタを ' + result.出荷実績の取り込み + ' 行足したり直したりしました(手で直した会社名はそのまま)。');
@@ -383,21 +386,28 @@ function finishResult_(result) {
 /* ---------------- 自動で回す ---------------- */
 
 /**
- * 毎朝 SORT_DAILY_HOUR 時に runSort が走るようにする。1回実行すればよい。
+ * 毎日 SORT_DAILY_HOURS の時刻に runSort が走るようにする。1回実行すればよい。
  * 何度実行しても、トリガーは1つにまとまる。
  */
 function installSortTrigger() {
   removeSortTrigger();
-  var t = ScriptApp.newTrigger('runSort')
-    .timeBased().everyDays(1).atHour(SORT_DAILY_HOUR)
-    .inTimezone(Session.getScriptTimeZone() || 'Asia/Tokyo')
-    .create();
-  PropertiesService.getScriptProperties().setProperty(PROP_DAILY_TRIGGER, t.getUniqueId());
+  createDailyTriggers_();
   PropertiesService.getScriptProperties().deleteProperty(PROP_DAILY_OFF);
 
-  var msg = '毎朝 ' + SORT_DAILY_HOUR + ' 時ごろに振り分けが自動で回るようにしました。';
+  var msg = '毎日 ' + dailyHoursText_() + 'ごろに振り分けが自動で回るようにしました。';
   Logger.log(msg);
   return msg;
+}
+
+/** SORT_DAILY_HOURS の時刻ごとにトリガーを作り、ID をまとめて覚える */
+function createDailyTriggers_() {
+  var ids = SORT_DAILY_HOURS.map(function (h) {
+    return ScriptApp.newTrigger('runSort')
+      .timeBased().everyDays(1).atHour(h)
+      .inTimezone(Session.getScriptTimeZone() || 'Asia/Tokyo')
+      .create().getUniqueId();
+  });
+  PropertiesService.getScriptProperties().setProperty(PROP_DAILY_TRIGGER, ids.join(','));
 }
 
 /** 自動実行を止める。以前の10分おきのトリガーもまとめて消す。 */
@@ -424,21 +434,19 @@ function removeSortTrigger() {
 function ensureDailyTrigger_() {
   var props = PropertiesService.getScriptProperties();
   if (props.getProperty(PROP_DAILY_OFF)) return '止めてあります(installSortTrigger で再開)';
-  var id = props.getProperty(PROP_DAILY_TRIGGER);
-  var have = id && ScriptApp.getProjectTriggers().some(function (t) { return t.getUniqueId() === id; });
-  if (have) return '入っています';
+  var ids = String(props.getProperty(PROP_DAILY_TRIGGER) || '').split(',').filter(String);
+  var live = {};
+  ScriptApp.getProjectTriggers().forEach(function (t) { live[t.getUniqueId()] = true; });
+  var have = ids.length === SORT_DAILY_HOURS.length && ids.every(function (id) { return live[id]; });
+  if (have) return '入っています(毎日 ' + dailyHoursText_() + ')';
 
-  // 印の無い古い毎朝トリガー(前の版で入れたもの)は、入れ直すときに消す
-  var cont = PropertiesService.getScriptProperties().getProperty(PROP_CONTINUE_TRIGGER);
+  // 足りない・時刻が変わったときは、続き用以外の runSort のトリガーを消して作り直す
+  var cont = props.getProperty(PROP_CONTINUE_TRIGGER);
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (t.getHandlerFunction() === 'runSort' && t.getUniqueId() !== cont) ScriptApp.deleteTrigger(t);
   });
-  var t = ScriptApp.newTrigger('runSort')
-    .timeBased().everyDays(1).atHour(SORT_DAILY_HOUR)
-    .inTimezone(Session.getScriptTimeZone() || 'Asia/Tokyo')
-    .create();
-  PropertiesService.getScriptProperties().setProperty(PROP_DAILY_TRIGGER, t.getUniqueId());
-  return '入れました(毎朝 ' + SORT_DAILY_HOUR + ' 時ごろ)';
+  createDailyTriggers_();
+  return '入れました(毎日 ' + dailyHoursText_() + 'ごろ)';
 }
 
 /** 時間切れで残ったぶんを、少し後にもう一度回す。 */
@@ -1224,8 +1232,8 @@ function collectDestNames_(sizeFolders) {
 }
 
 /** ◆チェック完了 の今月から DONE_LOOKBACK_MONTHS か月ぶんのファイル名。 */
-function collectCheckedNames_() {
-  return listPdfMetaIn_(checkedFolders_().map(function (fo) { return fo.id; }))
+function collectCheckedNames_(fromThisMonth) {
+  return listPdfMetaIn_(checkedFolders_(fromThisMonth).map(function (fo) { return fo.id; }))
     .map(function (f) { return f.name; });
 }
 
@@ -1235,15 +1243,21 @@ function collectCheckedNames_() {
  * 月フォルダ直下は、サイズで分ける前に完了したもの。
  * @return {Array<{id:string, kg:number}>} 月フォルダ直下は kg=0
  */
-function checkedFolders_() {
+function checkedFolders_(fromThisMonth) {
   // 10分覚えておく(作業指示一覧を開くたびにフォルダをたどらない)。
   // チェック完了の保存で新しいサイズのフォルダができたら、覚えたものを捨てる
   var cache = (typeof CacheService !== 'undefined') ? CacheService.getScriptCache() : null;
   var hit = cache && cache.get('checkedFolders');
-  if (hit) return JSON.parse(hit);
-  var out = checkedFoldersNow_();
-  if (cache) cache.put('checkedFolders', JSON.stringify(out), 10 * 60);
-  return out;
+  var all = hit ? JSON.parse(hit) : null;
+  if (!all) {
+    all = checkedFoldersNow_();
+    if (cache) cache.put('checkedFolders', JSON.stringify(all), 10 * 60);
+  }
+  if (!fromThisMonth) return all;
+  // 出荷日が今月以降の月フォルダだけ(チェック完了は出荷日の月に入っている)
+  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo', now = new Date();
+  var cur = Number(Utilities.formatDate(now, tz, 'yyyy')) * 100 + Number(Utilities.formatDate(now, tz, 'M'));
+  return all.filter(function (fo) { return fo.y * 100 + fo.m >= cur; });
 }
 
 function checkedFoldersNow_() {

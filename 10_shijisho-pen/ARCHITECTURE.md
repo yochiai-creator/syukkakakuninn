@@ -227,8 +227,8 @@ syukkakakuninn/
 
 | 関数 | 役目 |
 |---|---|
-| `runSort()` | 振り分けを1回ぶん回す。毎朝のトリガーもこれ |
-| `installSortTrigger()` | 毎朝6時(`SORT_DAILY_HOUR`)のトリガーを入れる。`runSort` も入っていなければ自分で入れるので、ふだんは不要 |
+| `runSort()` | 振り分けを1回ぶん回す。毎日6時・12時・15時のトリガーもこれ |
+| `installSortTrigger()` | 毎日6時・12時・15時(`SORT_DAILY_HOURS`)のトリガーを入れる。`runSort` も入っていなければ自分で入れるので、ふだんは不要 |
 | `removeSortTrigger()` | 自動実行を止める(止めた印を残す) |
 | `openCustomerMaster()` | 得意先マスタの URL をログに出す |
 
