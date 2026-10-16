@@ -1000,7 +1000,19 @@ function extractCustomerCode_(text) {
   // 出荷先とコードの間に OCR が拾った記号(: や ・)が挟まる回がある。
   // 記号か空白なら数文字まで読み飛ばす。
   var m = toHalfAlnum_(text).match(/出荷先[^0-9A-Za-z\r\n]{0,4}([0-9A-Za-z]{3,5})(?![0-9A-Za-z])/);
-  return (m && /\d/.test(m[1])) ? m[1].toUpperCase() : '';
+  return (m && /\d/.test(m[1])) ? trimOverreadCode_(m[1].toUpperCase()) : '';
+}
+
+/**
+ * コードの直後の会社名の1文字目を数字に読んだもの(2120グッドライフ → 21205)を
+ * 4文字に戻す。5文字のままマスタに無く、先頭4文字ならマスタにあるときだけ。
+ */
+function trimOverreadCode_(code) {
+  if (!code || code.length !== 5) return code;
+  var map = loadCustomerMaster_();
+  if (map[codeKey_(code)]) return code;
+  var head = code.slice(0, 4);
+  return map[codeKey_(head)] ? head : code;
 }
 
 /**
@@ -1579,7 +1591,7 @@ function renameCopiesFromMaster_() {
     var suffix = sm ? sm[1] : '';
     var shown = suffix ? rest.slice(0, -suffix.length) : rest;
 
-    var info = readInfo_(f.description), code = info[INFO_CODE];
+    var info = readInfo_(f.description), code = trimOverreadCode_(info[INFO_CODE]);
     if (!code) code = byName[shown];
     if (!code && pl.done && !info._コード読めず) {
       // チェック完了の古いものは説明欄が無いことがある。読み直してコードを取る(1回1分まで)
