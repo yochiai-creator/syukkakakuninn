@@ -528,7 +528,7 @@ function sortOne_(file, sizeFolders, doneNames, result) {
   // 1774 と I774 のように、読み違えると別の得意先になるコードは出荷先の名前で選ぶ
   var destRead = extractDestination_(text);
   code = pickCustomerByName_(code, destRead);
-  var to = lookupCustomer_(code);
+  var to = lookupCustomer_(code, destRead);
 
   if (!to) {
     to = extractDestination_(text);                 // マスタに無ければOCRの読み
@@ -1026,11 +1026,21 @@ function toHalfAlnum_(s) {
   });
 }
 
-/** 読み取ったコードでマスタを引く。先頭ゼロの違いは吸収する。 */
-function lookupCustomer_(code) {
+/**
+ * 読み取ったコードでマスタを引く。先頭ゼロの違いは吸収する。
+ * dest(OCR の出荷先)を渡すと、O↔0・I↔1・G↔6 の読み替えでしか当たらない
+ * ときに名前を確かめる。マスタに無い 6085(横田ガス)が G085(東邦液化ガス)に
+ * 当たったように、別の得意先に化けるのを防ぐ。
+ */
+var FUZZY_MIN_NAME_SCORE = 0.2;
+function lookupCustomer_(code, dest) {
   if (!code) return '';
   var map = loadCustomerMaster_();
-  return map[codeKey_(code)] || customerFuzzyCache_[fuzzyKey_(code)] || '';
+  var exact = map[codeKey_(code)];
+  if (exact) return exact;
+  var fz = customerFuzzyCache_[fuzzyKey_(code)] || '';
+  if (fz && dest && nameScore_(fz, dest) < FUZZY_MIN_NAME_SCORE) return '';
+  return fz;
 }
 
 
@@ -1626,7 +1636,7 @@ function renameCopiesFromMaster_() {
       meta.description = writeInfo_(info);           // 次からはコードで引ける
     }
 
-    var to = lookupCustomer_(code);
+    var to = lookupCustomer_(code, info[INFO_DEST]);
     var want = to ? copyName_(m[1], to).replace(/\.pdf$/i, suffix + '.pdf') : name;
     if (want !== name) meta.name = want;
     if (!Object.keys(meta).length) return;
