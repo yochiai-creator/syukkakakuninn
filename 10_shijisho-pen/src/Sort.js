@@ -284,6 +284,32 @@ function previousVersion_(orderNo, date, first) {
   return prev;
 }
 
+/**
+ * 先頭の1文字を落として読んだコード(I111 を 111)を戻す。
+ * 3文字でマスタに無いとき、頭に1文字足すとマスタにあり、出荷先の名前も
+ * 合うものが1つだけならそれにする。
+ */
+function restoreDroppedHead_(code, dest) {
+  if (!code || !dest || !/^[0-9A-Z]{3}$/.test(code)) return code;
+  if (loadCustomerMaster_()[codeKey_(code)]) return code;
+  var c = customerNames_(), hits = [];
+  Object.keys(c.names).forEach(function (k) {
+    if (k.length !== 4 || k.slice(1) !== code) return;
+    var best = 0;
+    c.names[k].forEach(function (n) { best = Math.max(best, nameScore_(n, dest)); });
+    if (best >= 0.3) hits.push(k);
+  });
+  return hits.length === 1 ? hits[0] : code;
+}
+
+/** HXP99261~HXP99285 → 25。頭の英字が違う・逆順・1000本以上なら 0(数えない) */
+function countRange_(range) {
+  var m = String(range || '').match(/^([A-Z]{1,4})(\d{3,7})~([A-Z]{1,4})(\d{3,7})$/);
+  if (!m || m[1] !== m[3] || m[2].length !== m[4].length) return 0;
+  var n = Number(m[4]) - Number(m[2]) + 1;
+  return n >= 1 && n < 1000 ? n : 0;
+}
+
 /** 届き直して置き換わった古い版の「出荷日_依頼No_」。もうコピーしない */
 var PROP_SUPERSEDED = 'SUPERSEDED_PREFIXES';
 // この仕組みを入れる前に届き直したもの(古い版のコピーは手でゴミ箱へ入れた)
@@ -571,6 +597,7 @@ function sortOne_(file, sizeFolders, doneNames, result) {
   // 1774 と I774 のように、読み違えると別の得意先になるコードは出荷先の名前で選ぶ
   var destRead = extractDestination_(text);
   code = pickCustomerByName_(code, destRead);
+  code = restoreDroppedHead_(code, destRead);
   var to = lookupCustomer_(code, destRead);
 
   if (!to) {
@@ -674,6 +701,13 @@ function extractOrderInfo_(text) {
 
   m = t.match(/容器(?:No|NO|№)\.?\s*[:：]?\s*([A-Z]{1,4}\d{3,7})[\s\\~〜～\-]+([A-Z]{1,4}\d{3,7})/);
   if (m) info[INFO_RANGE] = m[1] + '~' + m[2];
+
+  // 数量の欄が読めなくても、容器No. が続き番号なら本数は数えられる
+  // (数量の数字が Tel の行の下に回って読めなかった 26-60891 など)
+  if (!info[INFO_QTY]) {
+    var n = countRange_(info[INFO_RANGE]);
+    if (n) info[INFO_QTY] = String(n);
+  }
 
   m = t.match(/時間指定[ \t:：]*([^\r\n]{1,20})/);
   if (m && /\d/.test(m[1])) info[INFO_TIME] = m[1].replace(/\s+/g, '').trim();
@@ -1685,6 +1719,12 @@ function renameCopiesFromMaster_() {
       meta.description = writeInfo_(info);           // 次からはコードで引ける
     }
 
+    var restored = restoreDroppedHead_(code, info[INFO_DEST]);
+    if (restored !== code) {
+      code = restored;
+      info[INFO_CODE] = code;
+      meta.description = writeInfo_(info);
+    }
     var to = lookupCustomer_(code, info[INFO_DEST]);
     var want = to ? copyName_(m[1], to).replace(/\.pdf$/i, suffix + '.pdf') : name;
     if (want !== name) meta.name = want;
