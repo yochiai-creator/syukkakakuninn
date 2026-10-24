@@ -255,21 +255,63 @@ function buildRevisionIndex_(months) {
     var where = places[(f.parents || []).filter(function (p) { return places[p]; })[0]];
     var state = where === 'done' ? '完了' : isSaved_(f) ? '途中保存' : '未';
     (idx.versions[m[2]] = idx.versions[m[2]] || []).push({
-      id: f.id, key: m[1], state: state, created: f.createdTime, name: f.name
+      id: f.id, key: m[1], no: m[2], state: state, created: f.createdTime, name: f.name,
+      first: firstContainer_(readInfo_(f.description)[INFO_RANGE])
     });
   });
   return idx;
 }
 
-/** 同じ依頼No. で出荷日が違う、いちばん新しい前の版。無ければ null */
-function previousVersion_(orderNo, date) {
-  var list = (revIndex_ && revIndex_.versions[orderNo]) || [];
+/**
+ * いちばん新しい前の版。無ければ null。
+ * - 同じ依頼No. で出荷日が違うもの
+ * - 出荷日が同じで、依頼No. の (1) の有無だけ違い、最初の容器No. が同じもの。
+ *   26-60884-0(1) が名前を 26-60884-0 に変えて届き直したことがある。
+ *   26-30618-0 と -0(1) のように別の注文のこともあるので、容器No. で見分ける
+ *   (同じ容器が2つの注文に載ることはない)
+ */
+function previousVersion_(orderNo, date, first) {
+  var idx = revIndex_ || { versions: {} };
   var prev = null;
-  list.forEach(function (v) {
-    if (v.key === date) return;
-    if (!prev || v.created > prev.created) prev = v;
+  var pick = function (v) { if (!prev || v.created > prev.created) prev = v; };
+  (idx.versions[orderNo] || []).forEach(function (v) { if (v.key !== date) pick(v); });
+  if (prev || !first) return prev;
+  var base = orderBase_(orderNo);
+  Object.keys(idx.versions).forEach(function (no) {
+    if (no === orderNo || orderBase_(no) !== base) return;
+    idx.versions[no].forEach(function (v) { if (v.key === date && v.first === first) pick(v); });
   });
   return prev;
+}
+
+/** 届き直して置き換わった古い版の「出荷日_依頼No_」。もうコピーしない */
+var PROP_SUPERSEDED = 'SUPERSEDED_PREFIXES';
+// この仕組みを入れる前に届き直したもの(古い版のコピーは手でゴミ箱へ入れた)
+var SUPERSEDED_FIRST = ['26.10.26_26-60884-0(1)_'];
+function supersededPrefixes_() {
+  try {
+    var v = PropertiesService.getScriptProperties().getProperty(PROP_SUPERSEDED);
+    return v ? JSON.parse(v) : SUPERSEDED_FIRST.slice();
+  }
+  catch (e) { return []; }
+}
+function rememberSuperseded_(prefix) {
+  var list = supersededPrefixes_();
+  if (list.indexOf(prefix) >= 0) return;
+  list.push(prefix);
+  PropertiesService.getScriptProperties()
+    .setProperty(PROP_SUPERSEDED, JSON.stringify(list.slice(-300)));   // 古いものから捨てる
+}
+
+/** 26-60884-0(1) → 26-60884-0 */
+function orderBase_(orderNo) {
+  return String(orderNo).replace(/\(\d+\)$/, '');
+}
+
+/** 最初の容器No.(HEP64142 など)。空白で割れて読まれることがある(HEP 6 4 1 4 2) */
+function firstContainer_(s) {
+  var m = String(s || '').replace(/[\s　]+/g, '').match(/([A-Z]{3})(\d{5})/);
+  return m ? m[1] + m[2] : '';
 }
 var sortStarted_  = 0;   // 実行の開始時刻。複数の月にまたがっても1つで数える
 
@@ -297,7 +339,8 @@ function runMonth_(yearName, monthName, max) {
   // 同じ指図書を二度チェックすることになる。
   // 振り分けるのは出荷日が明日以降のものだけなので、チェック完了も出荷日が
   // 今月以降の月フォルダだけ見れば足りる(先月以前は読まない)
-  var doneNames = collectDestNames_(sizeFolders).concat(collectCheckedNames_(true));
+  var doneNames = collectDestNames_(sizeFolders).concat(collectCheckedNames_(true))
+    .concat(supersededPrefixes_());
 
   var result = { コピー: [], 済み: 0, 対象外: 0, skip: [], 未登録: [], 残り: 0, 訂正版: [] };
   var files = DriveApp.getFolderById(src).getFilesByType(MimeType.PDF);
@@ -555,13 +598,18 @@ function sortOne_(file, sizeFolders, doneNames, result) {
 
   // 訂正版: 前の版を説明欄で結び、まだチェック前の前の版のコピーはゴミ箱へ
   // (ページはアプリで最初に開いたときにつなぐ。ゴミ箱でも30日は読める)
-  var prev = previousVersion_(orderNo, date);
+  var first = firstContainer_(info[INFO_RANGE]) ||
+              firstContainer_(toHalfAlnum_(text).slice(Math.max(0, toHalfAlnum_(text).indexOf('容器No'))));
+  var prev = previousVersion_(orderNo, date, first);
   if (prev) {
     info[INFO_PREV] = prev.id;
     info[INFO_PREV_DATE] = prev.key;
     info[INFO_PREV_STATE] = prev.state;
     if (prev.state !== '完了') {
       Drive.Files.update({ trashed: true }, prev.id, null, { supportsAllDrives: true });
+      // 依頼No. の違う前の版(60884-0(1) → 60884-0)は、元の指図書の名前では
+      // 新しい版と結べない。コピーを消すと次の実行でまたコピーされるので覚えておく
+      if (prev.no !== orderNo) rememberSuperseded_(prev.key + '_' + prev.no + '_');
     }
     result.訂正版 = (result.訂正版 || []).concat(
       newName + '  ← 前の版 ' + prev.key + '(' + prev.state + ')');
