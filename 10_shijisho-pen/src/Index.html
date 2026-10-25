@@ -917,6 +917,14 @@ $("#goUp").onclick = function(){
 refreshFolder();
 openFolder("");
 
+/* ダッシュボードの入込場（チェック前の指図書）から ?file=<ファイルID> で開かれたら、
+   その指図書をすぐ開く。一覧から探し直さなくて済むように。
+   開けないID(PDFでない・消えた)は loadPdf がエラーにして、いつもの「開けませんでした」が出る。 */
+google.script.url.getLocation(function(loc){
+  var id = loc && loc.parameter && loc.parameter.file;
+  if (id && /^[A-Za-z0-9_-]{10,}$/.test(id)) openFile({id: id});
+});
+
 /* ---------- 作業指示一覧(簡易版) ----------
    正式な作業指示一覧表は当日にしか出ないので、振り分けたコピーの名前と
    説明欄(数量など)からアプリの中で作る。容器サイズを横断して1日ぶん並べ、
