@@ -399,65 +399,12 @@ function workSheet(dayKey) {
 
   var list = [];
   var got = rows[dayKey] || {};
-  var checks = workChecks_(dayKey);
-  Object.keys(got).forEach(function (p) {
-    got[p].check = checks[got[p].no] || '';
-    list.push(got[p]);
-  });
+  Object.keys(got).forEach(function (p) { list.push(got[p]); });
   list.sort(function (a, b) {
     return (a.kg || 999) - (b.kg || 999) || (a.no < b.no ? -1 : a.no > b.no ? 1 : 0);
   });
 
   return { days: dayList, day: dayKey, today: String(today), rows: list };
-}
-
-/* ---------------- 作業指示一覧のチェック ----------------
- * 一覧の行ごとに付けるチェック(指図書のチェック完了とは別)。
- * どのタブレットからも同じに見えるよう、スクリプトプロパティに日ごとに置く。
- *   wlcheck:26.10.26 → {"26-30613-0(1)": "10:23", ...}  (依頼No. → 付けた時刻)
- */
-var WL_CHECK_PREFIX = 'wlcheck:';
-var WL_CHECK_KEEP_DAYS = 14;    // これより前の日のチェックは消す
-
-function workChecks_(dayKey) {
-  if (!dayKey) return {};
-  try {
-    return JSON.parse(PropertiesService.getScriptProperties().getProperty(WL_CHECK_PREFIX + dayKey) || '{}');
-  } catch (e) {
-    return {};
-  }
-}
-
-/**
- * アプリから呼ぶ。チェックを付ける(on=true)・外す。その日の全部のチェックを返す。
- * 2台で同時に押しても消し合わないよう、読み書きはロックの中で行う。
- */
-function setWorkCheck(dayKey, orderNo, on) {
-  if (!/^\d{2}\.\d{2}\.\d{2}$/.test(String(dayKey)) || !orderNo) throw new Error('日付か依頼No. がありません');
-  var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    var props = PropertiesService.getScriptProperties();
-    var map = workChecks_(dayKey);
-    if (on) map[orderNo] = Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Tokyo', 'HH:mm');
-    else delete map[orderNo];
-    if (Object.keys(map).length) props.setProperty(WL_CHECK_PREFIX + dayKey, JSON.stringify(map));
-    else props.deleteProperty(WL_CHECK_PREFIX + dayKey);
-    dropOldWorkChecks_(props);
-    return map;
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-function dropOldWorkChecks_(props) {
-  var limit = new Date();
-  limit.setDate(limit.getDate() - WL_CHECK_KEEP_DAYS);
-  var min = Number(Utilities.formatDate(limit, Session.getScriptTimeZone() || 'Asia/Tokyo', 'yyyyMMdd'));
-  props.getKeys().forEach(function (k) {
-    var m = k.indexOf(WL_CHECK_PREFIX) === 0 && k.slice(WL_CHECK_PREFIX.length).match(/^(\d{2})\.(\d{2})\.(\d{2})$/);
-    if (m && Number('20' + m[1] + m[2] + m[3]) < min) props.deleteProperty(k);
-  });
 }
 
 /** 品名 '新軽量47L (20kg)' から 20。読めなければ 0 */
