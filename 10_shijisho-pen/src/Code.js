@@ -339,7 +339,7 @@ function dayNum_(key) {
   return Number('20' + p[0] + p[1] + p[2]);
 }
 
-/** 作業指示一覧のPDF(26.10.26_作業指示一覧(50Ｋ).pdf)か。指図書の一覧や片付けには入れない */
+/** 作業指示一覧表のコピー(26.10.26_作業指示一覧表.pdf)か。指図書の一覧や片付けには入れない */
 var WORK_LIST_WORD = '作業指示一覧';
 function isWorkListName_(name) {
   return String(name).indexOf(WORK_LIST_WORD) >= 0;
@@ -914,6 +914,7 @@ function saveDone_(fileId, original, blob) {
  * 説明欄の品名から引き、それでも分からなければ「その他」。
  */
 function doneSizeName_(original) {
+  if (isWorkListName_(original.name)) return WORK_LIST_FOLDER;    // 作業指示一覧表
   var pid = (original.parents || [])[0];
   if (pid) {
     try {

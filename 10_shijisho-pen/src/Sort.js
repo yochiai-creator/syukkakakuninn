@@ -113,6 +113,7 @@ function runSort() {
 
     // 毎朝の自動実行が入っていなければ入れる(入れ忘れ・消えたときの備え)
     var daily = step_(ensureDailyTrigger_);
+    var wlTrigger = step_(ensureWorkListTrigger_);
 
     // 片付けは先に済ませる。振り分けが時間いっぱいまで回っても、
     // 出荷日を過ぎたものが容器種類別に残らないように。
@@ -128,15 +129,15 @@ function runSort() {
     var r = sortMonths_(targetMonths_(), 100000);  // 打ち切りは時間の方で効かせる
     if (seeded !== '済み') r.出荷実績の取り込み = seeded;
     r.毎朝の自動実行 = daily;
+    r.作業指示一覧表の見回り = wlTrigger;
     Object.keys(early).forEach(function (k) { r[k] = early[k]; });
     if (early.チェック完了の読み直し残り) r.残り += early.チェック完了の読み直し残り;
 
     put_(r, '名前を直した', step_(renameCopiesFromMaster_));
     put_(r, '途中保存の目印を付けた', step_(markSavedCopies_));
-    // 作業指示一覧のPDF(サイズのフォルダに出荷日ごと)。名前を直したあとに作る
-    var lists = step_(makeWorkLists_);
-    put_(r, '作業指示一覧を作った', lists);
-    if (lists && lists.残り) r.残り += lists.残り;
+    // 本社から届いた作業指示一覧表を容器種類別へコピーする(15分ごとにも見ている)
+    put_(r, '作業指示一覧表をコピーした', step_(copyWorkLists_));
+    put_(r, '自動で作っていた一覧を片付けた', step_(removeGeneratedWorkLists_));
     put_(r, '表に足した得意先', step_(function () { return appendUnknownCustomers_(r.未登録); }));
 
     // いちばん時間のかかる読み足しは最後。残り時間のぶんだけ進める
