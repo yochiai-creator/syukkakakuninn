@@ -133,6 +133,10 @@ function runSort() {
 
     put_(r, '名前を直した', step_(renameCopiesFromMaster_));
     put_(r, '途中保存の目印を付けた', step_(markSavedCopies_));
+    // 作業指示一覧のPDF(サイズのフォルダに出荷日ごと)。名前を直したあとに作る
+    var lists = step_(makeWorkLists_);
+    put_(r, '作業指示一覧を作った', lists);
+    if (lists && lists.残り) r.残り += lists.残り;
     put_(r, '表に足した得意先', step_(function () { return appendUnknownCustomers_(r.未登録); }));
 
     // いちばん時間のかかる読み足しは最後。残り時間のぶんだけ進める
@@ -251,7 +255,7 @@ function buildRevisionIndex_(months) {
   checkedFolders_().forEach(function (fo) { places[fo.id] = 'done'; });
   listPdfMetaIn_(Object.keys(places)).forEach(function (f) {
     var m = f.name.match(COPY);
-    if (!m) return;
+    if (!m || isWorkListName_(f.name)) return;
     var where = places[(f.parents || []).filter(function (p) { return places[p]; })[0]];
     var state = where === 'done' ? '完了' : isSaved_(f) ? '途中保存' : '未';
     (idx.versions[m[2]] = idx.versions[m[2]] || []).push({
@@ -1417,6 +1421,7 @@ function sortCheckedFiles_() {
   listPdfMetaIn_(Object.keys(byId)).forEach(function (f) {
     var name = f.name.match(/^(\d{2})\.(\d{2})\.\d{2}_/);
     if (!name) return;
+    if (isWorkListName_(f.name)) return;   // 作業指示一覧のPDFは指図書ではない
     var fo = byId[(f.parents || []).filter(function (p) { return byId[p]; })[0]];
     if (!fo) return;
 
@@ -1532,6 +1537,7 @@ function fillCopyInfo_() {
 
   Object.keys(index).forEach(function (kg) {
     listPdfMeta_(index[kg].id).forEach(function (f) {
+      if (isWorkListName_(f.name)) return;   // 作業指示一覧のPDFは指図書ではない
       var m = f.name.match(/^(\d{2}\.\d{2}\.\d{2})_[^_]+_/);
       if (!m || shipDateNum_(m[1]) < today) return;
       var info = readInfo_(f.description);
@@ -1573,6 +1579,7 @@ function trashCheckedLeftovers_() {
   var trashed = [];
   folders.forEach(function (fo) {
     listPdfMeta_(fo.id).forEach(function (f) {
+      if (isWorkListName_(f.name)) return;   // 作業指示一覧のPDFは指図書ではない
       var m = f.name.match(/^\d{2}\.\d{2}\.\d{2}_[^_]+_/);   // 26.09.25_26-60749-0(1)_
       if (!m) return;
       if (isSaved_(f) || /_書込(_\d+)?\.pdf$/i.test(f.name)) return;
@@ -1675,6 +1682,7 @@ function renameCopiesFromMaster_() {
     var pl = places[(f.parents || []).filter(function (p) { return places[p]; })[0]];
     if (!pl) return;
     var name = f.name;
+    if (isWorkListName_(f.name)) return;   // 作業指示一覧のPDFは指図書ではない
     var m = name.match(/^(\d{2}\.\d{2}\.\d{2}_[^_]+_)/);   // 26.09.25_26-60749-0(1)_
     if (!m) return;
 
@@ -1763,6 +1771,7 @@ function markSavedCopies_() {
   folders.forEach(function (fo) {
     listPdfMeta_(fo.id).forEach(function (f) {
       if (isSaved_(f)) return;
+      if (isWorkListName_(f.name)) return;   // 作業指示一覧のPDFは指図書ではない
       var m = f.name.match(/^((\d{2})\.(\d{2})\.\d{2}_[^_]+)_/);   // 26.09.25_26-60749-0(1)
       if (!m) return;
       todo.push({ f: f, path: fo.path, key: m[1], y: Number('20' + m[2]), mo: Number(m[3]) });

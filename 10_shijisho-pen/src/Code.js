@@ -319,23 +319,73 @@ function listPdfs() {
  * @return {{days:Array, day:string, rows:Array}}
  */
 function workSheet(dayKey) {
+  var w = workIndex_();
+  var dayList = w.dayList, days = w.days, rows = w.rows, today = w.today;
+
+  if (!dayKey || !days[dayKey]) {
+    dayKey = '';
+    for (var i = 0; i < dayList.length; i++) {
+      if (dayNum_(dayList[i].key) >= today) { dayKey = dayList[i].key; break; }
+    }
+    if (!dayKey && dayList.length) dayKey = dayList[dayList.length - 1].key;
+  }
+
+  return { days: dayList, day: dayKey, today: String(today), rows: workRowsOf_(rows[dayKey]) };
+}
+
+/** '26.10.26' → 20261026 */
+function dayNum_(key) {
+  var p = String(key).split('.');
+  return Number('20' + p[0] + p[1] + p[2]);
+}
+
+/** 作業指示一覧のPDF(26.10.26_作業指示一覧(50Ｋ).pdf)か。指図書の一覧や片付けには入れない */
+var WORK_LIST_WORD = '作業指示一覧';
+function isWorkListName_(name) {
+  return String(name).indexOf(WORK_LIST_WORD) >= 0;
+}
+
+/** 1日ぶんの行を、容器サイズ → 依頼No. の順に並べる */
+function workRowsOf_(got) {
+  var list = [];
+  Object.keys(got || {}).forEach(function (p) { list.push(got[p]); });
+  return list.sort(function (a, b) {
+    return (a.kg || 999) - (b.kg || 999) || (a.no < b.no ? -1 : a.no > b.no ? 1 : 0);
+  });
+}
+
+/**
+ * 作業指示一覧の元。容器種類別・要確認/出荷日超過・チェック完了(今月以降)の
+ * コピーをまとめて読み、出荷日ごと・指図書ごとの行にする。
+ * 作業指示一覧のPDFそのものは workLists に分けて返す(行には入れない)。
+ */
+function workIndex_() {
   var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
   var today = Number(Utilities.formatDate(new Date(), tz, 'yyyyMMdd'));
   var NAME = /^(\d{2})\.(\d{2})\.(\d{2})_([^_]+)_(.+?)\.pdf$/i;
-  var num = function (k) { var p = k.split('.'); return Number('20' + p[0] + p[1] + p[2]); };
+  var LIST = /^(\d{2}\.\d{2}\.\d{2})_作業指示一覧/;
 
   var places = {};
   var index = buildSizeIndex_(getFolderId_());
-  Object.keys(index).forEach(function (kg) { places[index[kg].id] = { kg: Number(kg), done: false }; });
+  Object.keys(index).forEach(function (kg) {
+    places[index[kg].id] = { kg: Number(kg), done: false, id: index[kg].id, name: index[kg].path.split('/').pop() };
+  });
   places[overdueFolderId_()] = { kg: 0, done: false, overdue: true };
   // 一覧に出すのは今日以降の日なので、チェック完了は出荷日が今月以降の月だけ読む
   checkedFolders_(true).forEach(function (fo) { places[fo.id] = { kg: fo.kg, done: true }; });
 
   // フォルダごとに問い合わせず、まとめて読む
-  var byPlace = {};
+  var byPlace = {}, workLists = [];
   listPdfMetaIn_(Object.keys(places)).forEach(function (f) {
     var pid = (f.parents || []).filter(function (p) { return places[p]; })[0];
-    if (pid) (byPlace[pid] = byPlace[pid] || []).push(f);
+    if (!pid) return;
+    if (isWorkListName_(f.name)) {
+      var lm = f.name.match(LIST);
+      if (lm) workLists.push({ id: f.id, name: f.name, key: lm[1], kg: places[pid].kg, done: places[pid].done,
+                               folder: pid, description: f.description || '', saved: isSaved_(f) });
+      return;
+    }
+    (byPlace[pid] = byPlace[pid] || []).push(f);
   });
 
   // 品名が読めていない行のサイズを容器No. の頭から引くための対応表
@@ -345,14 +395,14 @@ function workSheet(dayKey) {
   });
   var prefixKg = learnPrefixKg_(known);
 
-  var days = {}, rows = {}, order = [];
+  var days = {}, rows = {};
   Object.keys(byPlace).forEach(function (pid) {
     var pl = places[pid];
     byPlace[pid].forEach(function (f) {
       var m = f.name.match(NAME);
       if (!m) return;
       var key = m[1] + '.' + m[2] + '.' + m[3];
-      var n = num(key);
+      var n = dayNum_(key);
       var prefix = key + '_' + m[4];
       var st = pl.done ? 'done' : isSaved_(f) ? 'saved' : 'todo';
 
@@ -375,7 +425,7 @@ function workSheet(dayKey) {
       var have = rows[key][prefix];
       // 同じ指図書が2か所にあるときは、完了 > 途中保存 > 未 の順で表に出す
       var rank = { done: 3, saved: 2, todo: 1 };
-      if (!have) { rows[key][prefix] = row; order.push(prefix); }
+      if (!have) { rows[key][prefix] = row; }
       else if (rank[st] > rank[have.status]) {
         ['qty', 'range', 'time', 'item', 'kg', 'rev'].forEach(function (k) { if (!row[k]) row[k] = have[k]; });
         rows[key][prefix] = row;
@@ -387,24 +437,9 @@ function workSheet(dayKey) {
 
   var dayList = Object.keys(days).map(function (k) {
     return { key: k, count: days[k].count, done: days[k].done };
-  }).sort(function (a, b) { return num(a.key) - num(b.key); });
+  }).sort(function (a, b) { return dayNum_(a.key) - dayNum_(b.key); });
 
-  if (!dayKey || !days[dayKey]) {
-    dayKey = '';
-    for (var i = 0; i < dayList.length; i++) {
-      if (num(dayList[i].key) >= today) { dayKey = dayList[i].key; break; }
-    }
-    if (!dayKey && dayList.length) dayKey = dayList[dayList.length - 1].key;
-  }
-
-  var list = [];
-  var got = rows[dayKey] || {};
-  Object.keys(got).forEach(function (p) { list.push(got[p]); });
-  list.sort(function (a, b) {
-    return (a.kg || 999) - (b.kg || 999) || (a.no < b.no ? -1 : a.no > b.no ? 1 : 0);
-  });
-
-  return { days: dayList, day: dayKey, today: String(today), rows: list };
+  return { today: today, days: days, dayList: dayList, rows: rows, workLists: workLists, sizeIndex: index };
 }
 
 /** 品名 '新軽量47L (20kg)' から 20。読めなければ 0 */
