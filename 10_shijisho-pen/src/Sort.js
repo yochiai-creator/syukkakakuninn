@@ -1297,14 +1297,53 @@ function dominant_(counts) {
  *   出荷先: G737 (株)りゅうせき 中部物流センター → (株)りゅうせき 中部物流センター
  */
 function extractDestination_(text) {
-  var m = text.match(/出荷先[:：]?\s*([^\r\n]+)/);
-  if (!m) return '';
+  // 「出荷先」は1枚目のほかに、対比表・別紙にも出てくる。1枚目は字が崩れやすく
+  // (ツバメガスフロンティア → 八メ书ㄨㄣˊㄗ)、対比表の方がきれいに読めることが多い。
+  // 全部拾って、崩れた字のいちばん少ないものを使う(同じなら先に出てきた方)。
+  var best = null;
+  destinationCandidates_(text).forEach(function (c, i) {
+    var bad = garbleScore_(c);
+    if (!best || bad < best.bad) best = { name: c, bad: bad };
+  });
+  return best ? best.name : '';
+}
 
-  var line = m[1].replace(/\s+/g, ' ').trim();
+/** 「出荷先」の後ろ(同じ行、無ければ次の数行)から、出荷先の名前らしいものを集める */
+function destinationCandidates_(text) {
+  var lines = String(text || '').split(/\r?\n/);
+  var out = [];
+  for (var i = 0; i < lines.length; i++) {
+    var m = lines[i].match(/出荷先[:：]?[ \t　]*(.*)$/);
+    if (!m) continue;
+    var rest = sanitizeName_(stripCustomerCode_(m[1].replace(/\s+/g, ' ').trim()));
+    if (looksLikeName_(rest)) { out.push(rest); continue; }
+    for (var j = i + 1; j < lines.length && j <= i + 8; j++) {
+      var l = sanitizeName_(stripCustomerCode_(lines[j].replace(/\s+/g, ' ').trim()));
+      if (!l) continue;
+      if (looksLikeName_(l)) { out.push(l); break; }
+    }
+  }
+  return out;
+}
 
-  line = stripCustomerCode_(line);
+/** 名前らしい行か。番号・日付・住所・ほかの欄の見出しは外す */
+function looksLikeName_(s) {
+  if (!s || !/[ぁ-んァ-ヶ一-龠]/.test(s)) return false;
+  if (/^(No|依頼|容器|数量|品名|支給品|刻印|出荷希望日|バーコード|グループ)/.test(s)) return false;
+  if (/^\d|\d{2}\/\d{2}/.test(s)) return false;
+  if (/[都道府県].{0,4}[市郡区町村]/.test(s) && !/(株|有|会社|センター|営業所|支店)/.test(s)) return false;
+  return true;
+}
 
-  return sanitizeName_(line);
+/**
+ * 字の崩れ具合。OCR がカタカナを注音記号(ㄨㄣ)や中国の簡体字(书)、
+ * 形の似た部首(艹术卜)に読んだもの、名前の途中の数字の並びを数える。
+ */
+var GARBLE_CHARS = /[\u3105-\u312f\u02c7\u02ca\u02cb\u02d9书弋艹术厶儿卜乂刂丷亻冫穷弯]/g;
+function garbleScore_(s) {
+  var n = (String(s).match(GARBLE_CHARS) || []).length;
+  n += (String(s).match(/\d{3,}/g) || []).length * 2;
+  return n;
 }
 
 /**
