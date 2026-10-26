@@ -213,7 +213,7 @@
   #wlBody th:first-child, #wlBody td:first-child{padding-left:16px;}
   #wlBody td.n{text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap;}
   #wlBody td.no, #wlBody td.rg{font-variant-numeric:tabular-nums; white-space:nowrap; font-size:13px;}
-  #wlBody td.to{font-weight:500;}
+  #wlBody td.to{font-weight:500; min-width:8em;}
   #wlBody td.it, #wlBody td.tm{font-size:12px; color:#4a4d54;}
   #wlBody tr.wg td{background:#f0ede6; font-weight:600; font-size:13px; padding-top:7px; padding-bottom:7px;}
   #wlBody tr.wg td span{font-weight:400; color:#5c5f66; margin-left:8px;}
@@ -222,6 +222,13 @@
   #wlBody tr.saved td{background:#fff6e6;}
   #wlBody tr.done td{color:#8a8d94;}
   #wlBody tr.done td.to{text-decoration:line-through; text-decoration-color:rgba(0,0,0,.25);}
+  /* 一覧のチェック。押しやすいよう大きめにする */
+  #wlBody td.ck{width:52px; padding:4px 6px 4px 12px; text-align:center; white-space:nowrap;}
+  #wlBody td.ck button{width:40px; height:40px; min-height:0; padding:0; border:2px solid #9a9690;
+    border-radius:8px; background:#fff; font-size:22px; font-weight:700; line-height:1; color:transparent;}
+  #wlBody td.ck button.on{background:#0b6b5e; border-color:#0b6b5e; color:#fff;}
+  #wlBody td.ck small{display:block; font-size:10px; color:#5c5f66; margin-top:2px; min-height:12px;}
+  #wlBody tr.checked td{background:#eaf3ee;}
   .st{display:inline-block; padding:1px 7px; border-radius:9px; font-size:11px; font-weight:600;
       white-space:nowrap; background:#ecebe7; color:#5c5f66;}
   .st.saved{background:#e08a00; color:#fff;}
@@ -972,16 +979,19 @@ function renderWorkList(res){
     body.innerHTML='<p class="msg">振り分けた指図書がありません。</p>';
     return;
   }
-  var qty=0, qtyMissing=0, cnt={todo:0, saved:0, done:0};
-  rows.forEach(function(r){ cnt[r.status]++; if(r.qty) qty+=Number(r.qty); else qtyMissing++; });
-  sum.textContent=dayLabel(res.day)+" 出荷  "+rows.length+" 件 · "+qty+" 本"+(qtyMissing?"(数量不明 "+qtyMissing+" 件)":"");
-  var sp=document.createElement("span");
-  sp.textContent="完了 "+cnt.done+" / 途中保存 "+cnt.saved+" / 未 "+cnt.todo;
-  sum.appendChild(sp);
+  var paintSum=function(){
+    var qty=0, qtyMissing=0, cnt={todo:0, saved:0, done:0}, ck=0;
+    rows.forEach(function(r){ cnt[r.status]++; if(r.qty) qty+=Number(r.qty); else qtyMissing++; if(r.check) ck++; });
+    sum.textContent=dayLabel(res.day)+" 出荷  "+rows.length+" 件 · "+qty+" 本"+(qtyMissing?"(数量不明 "+qtyMissing+" 件)":"");
+    var sp=document.createElement("span");
+    sp.textContent="チェック "+ck+"/"+rows.length+" · 完了 "+cnt.done+" / 途中保存 "+cnt.saved+" / 未 "+cnt.todo;
+    sum.appendChild(sp);
+  };
+  paintSum();
 
   var tb=document.createElement("table");
   var head=document.createElement("tr");
-  ["依頼No.","出荷先","品名","数量","容器No.","時間指定","状態"].forEach(function(h){
+  ["✓","依頼No.","出荷先","品名","数量","容器No.","時間指定","状態"].forEach(function(h){
     var th=document.createElement("th"); th.textContent=h; head.appendChild(th);
   });
   var thead=document.createElement("thead"); thead.appendChild(head); tb.appendChild(thead);
@@ -995,7 +1005,7 @@ function renderWorkList(res){
       var same=rows.filter(function(x){ return x.kg===r.kg; });
       var q=same.reduce(function(a,x){ return a+(Number(x.qty)||0); }, 0);
       var g=document.createElement("tr"); g.className="wg";
-      var td=document.createElement("td"); td.colSpan=7;
+      var td=document.createElement("td"); td.colSpan=8;
       td.textContent = r.kg===9999 ? "バルク" : r.kg ? r.kg+"kg" : "サイズ不明";
       var miss=same.filter(function(x){ return !x.qty; }).length;
       var s2=document.createElement("span");
@@ -1004,7 +1014,29 @@ function renderWorkList(res){
       g.appendChild(td); tbody.appendChild(g);
     }
     var tr=document.createElement("tr");
-    tr.className="r "+r.status;
+    var ckTd=cell(tr,"ck","");
+    var ckBtn=document.createElement("button"); ckBtn.textContent="✓";
+    var ckAt=document.createElement("small");
+    ckTd.appendChild(ckBtn); ckTd.appendChild(ckAt);
+    var paintCheck=function(){
+      tr.className="r "+r.status+(r.check ? " checked" : "");
+      ckBtn.className=r.check ? "on" : "";
+      ckBtn.setAttribute("aria-label", r.check ? "チェックを外す" : "チェックする");
+      ckAt.textContent=r.check && r.check!=="…" ? r.check : "";
+    };
+    paintCheck();
+    ckTd.onclick=function(ev){
+      ev.stopPropagation();                 // 行を押したとき(指図書を開く)と分ける
+      var before=r.check, on=!before;
+      r.check = on ? "…" : ""; paintCheck(); paintSum();
+      google.script.run
+        .withSuccessHandler(function(map){ r.check=map[r.no]||""; paintCheck(); paintSum(); })
+        .withFailureHandler(function(err){
+          r.check=before; paintCheck(); paintSum();
+          toast("チェックを保存できませんでした: "+err.message);
+        })
+        .setWorkCheck(res.day, r.no, on);
+    };
     cell(tr,"no",r.no);
     cell(tr,"to",r.to);
     cell(tr,"it",r.item);

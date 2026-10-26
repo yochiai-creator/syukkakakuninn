@@ -189,6 +189,7 @@ syukkakakuninn/
 | `listSavedPdfs()` | 途中保存のファイルを全部(要確認に移ったものも)。どのフォルダにあるか付き |
 | `searchPdfs(keyword)` | 起点の配下すべてをファイル名で検索 |
 | `workSheet(dayKey)` | 作業指示一覧(簡易版)。容器サイズ別フォルダ・要確認・チェック完了を横断し、その日の行と、選べる日にちの一覧を返す |
+| `setWorkCheck(dayKey, orderNo, on)` | 作業指示一覧の行のチェックを付ける・外す。スクリプトプロパティ `wlcheck:<出荷日>` に `{依頼No.: 時刻}` で日ごとに置き、どのタブレットでも同じに見える。指図書のチェック完了とは別。14日より前の日のぶんは消す |
 | `loadPdf(fileId)` | PDF を base64 で返す。棚が有効なら書き込み前 PDF と書き込み一覧を返す |
 | `savePdf(req)` | 保存。`req.mode` が `overwrite`(上書き)/ `copy`(別に保存)/ `done`(チェック完了) |
 | `saveDiagLog(text)` | ペンの診断記録を棚の `ログ/` に置く |
