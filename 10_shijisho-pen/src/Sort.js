@@ -212,6 +212,7 @@ function sortMonths_(months, max) {
     all.skip   = all.skip.concat(r.skip);
     all.未登録 = all.未登録.concat(r.未登録);
     all.訂正版 = (all.訂正版 || []).concat(r.訂正版 || []);
+    all.取消   = (all.取消 || []).concat(r.取消 || []);
     all.済み   += r.済み;
     all.対象外 += r.対象外;
     all.残り   += r.残り;
@@ -313,6 +314,49 @@ function countRange_(range) {
   if (!m || m[1] !== m[3] || m[2].length !== m[4].length) return 0;
   var n = Number(m[4]) - Number(m[2]) + 1;
   return n >= 1 && n < 1000 ? n : 0;
+}
+
+/**
+ * 取り消された指図書のコピーを片付ける。
+ *   書き込んでいないコピー … ゴミ箱(30日は戻せる)
+ *   書き込んだ(途中保存)コピー … '004_要確認/取消 へ移す(書いたものは消さない)
+ *   チェック完了したもの … 触らない。結果に「チェック完了済み」と出して知らせる
+ * 容器種類別と 要確認/出荷日超過 を見る。片付け済みなら何もしない。
+ */
+var CANCEL_FOLDER = '取消';
+var cancelPlaces_ = null;     // 1回の実行で1度だけ読む { files:[], cancelId }
+function cancelCopies_(date, orderNo, doneNames, result) {
+  var prefix = date + '_' + orderNo + '_';
+  if (!cancelPlaces_) {
+    var index = buildSizeIndex_(SORT_DEST_ROOT_ID);
+    var ids = Object.keys(index).map(function (kg) { return index[kg].id; }).concat([overdueFolderId_()]);
+    cancelPlaces_ = { files: listPdfMetaIn_(ids), cancelId: '' };
+  }
+  var out = result.取消 = result.取消 || [];
+  var gone = {};
+  cancelPlaces_.files.forEach(function (f) {
+    if (f.name.indexOf(prefix) !== 0 || f.gone) return;
+    if (isSaved_(f)) {
+      if (!cancelPlaces_.cancelId) cancelPlaces_.cancelId = childFolder_(OVERDUE_PARENT_ID, CANCEL_FOLDER);
+      DriveApp.getFileById(f.id).moveTo(DriveApp.getFolderById(cancelPlaces_.cancelId));
+      out.push(f.name + '  → 要確認/取消 へ(書き込みあり)');
+    } else {
+      Drive.Files.update({ trashed: true }, f.id, null, { supportsAllDrives: true });
+      out.push(f.name + '  → ゴミ箱');
+    }
+    f.gone = true;
+    gone[f.name] = true;
+  });
+  // チェック完了済みのものは知らせるだけ。出荷日を過ぎたら毎回は出さない
+  if (shipDateNum_(date) >= sortTodayNum_) {
+    doneNames.forEach(function (n) {
+      if (n === prefix || n.indexOf(prefix) !== 0 || gone['done:' + n]) return;   // n === prefix は覚えた古い版の印
+      if (cancelPlaces_.files.some(function (f) { return f.name === n; })) return;  // 容器種類別にあるコピー
+      gone['done:' + n] = true;
+      out.push(n + '  (チェック完了済み。取消になっています)');
+    });
+  }
+  return 'cancelled';
 }
 
 /** 届き直して置き換わった古い版の「出荷日_依頼No_」。もうコピーしない */
@@ -559,7 +603,12 @@ function sortOne_(file, sizeFolders, doneNames, result) {
   // 日付と依頼Noはファイル名から取れる。ここは OCR に頼らない。
   //   出荷作業指図書_26.09.25_26-60749-0(1).pdf
   var m = srcName.match(/_(\d{2}\.\d{2}\.\d{2})_(\d{2}-\d+-\d+)(\(\d+\))?\s*\.pdf$/i);
-  if (!m) throw new Error('ファイル名から日付と依頼Noを読めません');
+  if (!m) {
+    // 取り消された指図書は、元の名前の後ろに【取消】が付いて届き直す
+    var cx = srcName.match(/_(\d{2}\.\d{2}\.\d{2})_(\d{2}-\d+-\d+)(\(\d+\))?\s*【取消】\s*\.pdf$/i);
+    if (cx) return cancelCopies_(cx[1], cx[2] + (cx[3] || ''), doneNames, result);
+    throw new Error('ファイル名から日付と依頼Noを読めません');
+  }
 
   var date = m[1];                 // 26.09.25
   var orderNo = m[2] + (m[3] || ''); // 26-60749-0(1)
