@@ -48,17 +48,21 @@ function copyWorkLists_() {
 
   var dest = cachedChildFolder_(SORT_DEST_ROOT_ID, WORK_LIST_FOLDER);
   var made = [];
+  // 手でコピーしたものも二重にしないよう、中身(md5)が同じものがあればコピー済みとみなす
+  var inDest = {};
+  listPdfMeta_(dest).forEach(function (f) { if (f.md5Checksum) inDest[f.md5Checksum] = true; });
 
   listPdfMeta_(WORK_LIST_SRC_ID).forEach(function (f) {
     var key = workListSrcKey_(f.name);
     if (!key || dayNum_(key) < today) return;       // 出荷日を過ぎた一覧表はコピーしない
     if (copied.indexOf(f.id) >= 0) return;
+    if (f.md5Checksum && inDest[f.md5Checksum]) { copied.push(f.id); return; }
     var name = uniqueName_(dest, key + '_' + WORK_LIST_FOLDER + '.pdf');
     Drive.Files.copy({ name: name, parents: [dest] }, f.id, { supportsAllDrives: true });
     copied.push(f.id);
     made.push(WORK_LIST_FOLDER + '/' + name);
   });
-  if (made.length) props.setProperty(PROP_WL_COPIED, JSON.stringify(copied.slice(-100)));
+  props.setProperty(PROP_WL_COPIED, JSON.stringify(copied.slice(-100)));
 
   // 出荷日を過ぎてもチェック完了していない一覧表は、指図書と同じく 要確認/出荷日超過 へ
   var moved = 0;
