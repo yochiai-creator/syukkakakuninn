@@ -773,7 +773,7 @@ function dayRow(day){
   var docs=day.files.filter(function(f){ return !parseSortName(f.name).list; });
   var saved=docs.filter(function(f){ return f.saved; }).length;
   var s=document.createElement("span"); s.className="cnt";
-  s.textContent=docs.length + " 件" + (docs.length<day.files.length ? " + 一覧" : "");
+  s.textContent = !docs.length ? "一覧表" : docs.length + " 件" + (docs.length<day.files.length ? " + 一覧表" : "");
   if(saved){
     var sv=document.createElement("span"); sv.className="sv";
     sv.textContent=" \u00b7 途中保存 " + saved;
