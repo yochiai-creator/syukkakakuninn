@@ -321,8 +321,9 @@ function makeExtraLists_() {
       String(readInfo_(x.f.description)[WL_EXTRA_ORDERS] || '').split(',').forEach(function (n) { if (n) fixed[n] = true; });
     });
     var open = extras.filter(function (x) { return !x.done && !isSaved_(x.f); });
+    // バルク(貯槽)はもともと一覧表に載らないので入れない
     var rows = workRowsOf_(w.rows[key]).filter(function (r) {
-      return !on[orderKey_(r.no)] && !on[firstContainer_(r.range)] && !fixed[r.no];
+      return r.kg !== BULK_KG && !on[orderKey_(r.no)] && !on[firstContainer_(r.range)] && !fixed[r.no];
     });
 
     if (!rows.length) { open.forEach(function (x) { trashFile_(x.f.id); }); return; }
