@@ -6,7 +6,9 @@
  * アプリで開いてペンで書き込み、チェック完了すると
  * ◆チェック完了/<年>/<月>/作業指示一覧表 に入る(指図書と同じ)。
  *
- *   元      WORK_LIST_SRC_ID のフォルダの 作業指示一覧表(26.10.26出荷分).PDF
+ *   元      '001_作業指示一覧表(WORK_LIST_ROOT_ID)の中の 作業指示一覧表(26.10.26出荷分).PDF。
+ *           年・月のフォルダに分かれているが、出荷日の月と違うフォルダに入ることがある
+ *           (11月出荷分が 10月 に入っていた)ので、フォルダは見ずにファイル名の出荷日で選ぶ
  *   コピー  ◆容器種類別/作業指示一覧表/26.10.26_作業指示一覧表.pdf
  *           「出荷日_依頼No_出荷先」の形にしない(2つ目の _ を入れない)。
  *           指図書のコピー向けの片付け・名前直し・数量の読み足しが触らないように。
@@ -16,7 +18,8 @@
  * コピー済みの元ファイルは ID で覚える。同じ日の一覧表が出し直されたら
  * (ID が違う)、それもコピーする(_2 が付く)。
  */
-var WORK_LIST_SRC_ID = '1LvjaUHY6Je53Aid_wR6p5SZv53zS1W5o';
+var WORK_LIST_ROOT_ID = '1NiDp83x1--d1w77SmHSlmUJeZXfAVfs3';   // '001_作業指示一覧表
+var WORK_LIST_SRC_DAYS = 40;   // この日数より前に更新された一覧表は見ない(問い合わせを軽くする)
 var WORK_LIST_FOLDER = '作業指示一覧表';          // 容器種類別・チェック完了の中のフォルダ名
 var PROP_WL_COPIED = 'WORK_LIST_COPIED';          // コピー済みの元ファイル ID(JSON の配列)
 var PROP_WL_TRIGGER = 'WORK_LIST_TRIGGER';
@@ -54,12 +57,14 @@ function copyWorkLists_() {
 
   var destFiles = listPdfMeta_(dest);
   var gone = {};      // この回でゴミ箱へ入れた・名前を変えたもの
-  listPdfMeta_(WORK_LIST_SRC_ID).forEach(function (f) {
+  workListSources_().forEach(function (f) {
     var key = workListSrcKey_(f.name);
     if (!key || dayNum_(key) < today) return;       // 出荷日を過ぎた一覧表はコピーしない
     // コピー済みは「ID:中身」で覚える。同じファイルの中身が差し替えられたときも新しい版として扱う
     var sig = f.id + ':' + (f.md5Checksum || '');
     if (copied.indexOf(sig) >= 0 || copied.indexOf(f.id) >= 0) return;   // ID だけは以前の覚え方
+    // 同じ中身の一覧表が別のフォルダにも置かれていたら(ID が違う)、訂正版にしない
+    if (f.md5Checksum && copied.some(function (c) { return c.slice(-f.md5Checksum.length - 1) === ':' + f.md5Checksum; })) return;
     if (f.md5Checksum && inDest[f.md5Checksum]) { copied.push(sig); return; }
 
     // 同じ日の前の版。書き込んだもの(途中保存)・チェック完了したもののうち新しいもの
@@ -108,6 +113,53 @@ function copyWorkLists_() {
   });
 
   return { 件数: made.length, 一覧: made, 出荷日超過へ: moved };
+}
+
+/**
+ * '001_作業指示一覧表 の中(直下・年のフォルダ・月のフォルダ)にある一覧表。
+ * フォルダの並びは1時間覚えておく。
+ */
+function workListSources_() {
+  var cache = (typeof CacheService !== 'undefined') ? CacheService.getScriptCache() : null;
+  var hit = cache && cache.get('wlSrcFolders');
+  var ids = hit ? JSON.parse(hit) : null;
+  if (!ids) {
+    ids = [WORK_LIST_ROOT_ID];
+    subFolderIds_(WORK_LIST_ROOT_ID).forEach(function (y) {
+      ids.push(y);
+      subFolderIds_(y).forEach(function (m) { ids.push(m); });
+    });
+    if (cache) cache.put('wlSrcFolders', JSON.stringify(ids), 60 * 60);
+  }
+  var since = new Date(Date.now() - WORK_LIST_SRC_DAYS * 24 * 3600 * 1000).toISOString();
+  var out = [];
+  for (var i = 0; i < ids.length; i += 20) {
+    var parents = ids.slice(i, i + 20).map(function (id) { return "'" + id + "' in parents"; }).join(' or ');
+    var token = null;
+    do {
+      var res = Drive.Files.list({
+        q: '(' + parents + ") and mimeType = 'application/pdf' and trashed = false" +
+           " and name contains '作業指示一覧表' and modifiedTime > '" + since + "'",
+        fields: 'nextPageToken,files(id,name,md5Checksum,modifiedTime,parents)',
+        pageSize: 1000,
+        pageToken: token || undefined,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true
+      });
+      out = out.concat(res.files || []);
+      token = res.nextPageToken;
+    } while (token);
+  }
+  return out;
+}
+
+/** 直下のフォルダの ID */
+function subFolderIds_(parentId) {
+  var res = Drive.Files.list({
+    q: "'" + parentId + "' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+    fields: 'files(id)', pageSize: 200, supportsAllDrives: true, includeItemsFromAllDrives: true
+  });
+  return (res.files || []).map(function (f) { return f.id; });
 }
 
 // 訂正版の一覧表の説明欄。前の版の ID・状態(途中保存/完了)、チェックを写したら 写し:済
