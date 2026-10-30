@@ -19,6 +19,7 @@
  * (ID が違う)、それもコピーする(_2 が付く)。
  */
 var WORK_LIST_ROOT_ID = '1NiDp83x1--d1w77SmHSlmUJeZXfAVfs3';   // '001_作業指示一覧表
+var WL_SIG_SINCE = '2026-10-30T08:00:00Z';   // これより前は、コピー済みを ID だけで覚えていた
 var WORK_LIST_SRC_DAYS = 40;   // この日数より前に更新された一覧表は見ない(問い合わせを軽くする)
 var WORK_LIST_FOLDER = '作業指示一覧表';          // 容器種類別・チェック完了の中のフォルダ名
 var PROP_WL_COPIED = 'WORK_LIST_COPIED';          // コピー済みの元ファイル ID(JSON の配列)
@@ -57,12 +58,14 @@ function copyWorkLists_() {
 
   var destFiles = listPdfMeta_(dest);
   var gone = {};      // この回でゴミ箱へ入れた・名前を変えたもの
-  workListSources_().forEach(function (f) {
+  latestWorkLists_(workListSources_(), today, copied).forEach(function (f) {
     var key = workListSrcKey_(f.name);
     if (!key || dayNum_(key) < today) return;       // 出荷日を過ぎた一覧表はコピーしない
     // コピー済みは「ID:中身」で覚える。同じファイルの中身が差し替えられたときも新しい版として扱う
     var sig = f.id + ':' + (f.md5Checksum || '');
-    if (copied.indexOf(sig) >= 0 || copied.indexOf(f.id) >= 0) return;   // ID だけは以前の覚え方
+    if (copied.indexOf(sig) >= 0) return;
+    // ID だけで覚えていた頃(中身を見ていなかった)のものは、その後に更新されていなければコピー済み
+    if (copied.indexOf(f.id) >= 0 && String(f.modifiedTime || '') < WL_SIG_SINCE) return;
     // 同じ中身の一覧表が別のフォルダにも置かれていたら(ID が違う)、訂正版にしない
     if (f.md5Checksum && copied.some(function (c) { return c.slice(-f.md5Checksum.length - 1) === ':' + f.md5Checksum; })) return;
     if (f.md5Checksum && inDest[f.md5Checksum]) { copied.push(sig); return; }
@@ -151,6 +154,55 @@ function workListSources_() {
     } while (token);
   }
   return out;
+}
+
+/**
+ * 同じ出荷日の一覧表が中身違いで2つ以上あるときは、PDF の「処理日」がいちばん新しいものだけを使う。
+ * 古い中身の一覧表があとから別のフォルダに置き直されることがあり(11/2・11/4・11/5分)、
+ * 置かれた順(更新日時)では新旧が分からないため。ほかは コピー済み として覚え、もう見ない。
+ */
+function latestWorkLists_(files, today, copied) {
+  var byKey = {}, out = [];
+  files.forEach(function (f) {
+    var key = workListSrcKey_(f.name);
+    if (!key || dayNum_(key) < today) return;
+    (byKey[key] = byKey[key] || []).push(f);
+  });
+  Object.keys(byKey).forEach(function (key) {
+    var list = byKey[key];
+    var md5s = {};
+    list.forEach(function (f) { md5s[f.md5Checksum || f.id] = true; });
+    if (Object.keys(md5s).length < 2) { out = out.concat(list); return; }
+    list.forEach(function (f) { f.proc = workListProcessedAt_(f); });
+    list.sort(function (a, b) {
+      return (b.proc - a.proc) || (String(b.modifiedTime) < String(a.modifiedTime) ? -1 : 1);
+    });
+    var best = list[0];
+    out.push(best);
+    list.slice(1).forEach(function (f) {
+      if (f.md5Checksum === best.md5Checksum) return;
+      var sig = f.id + ':' + (f.md5Checksum || '');
+      if (copied.indexOf(sig) < 0) copied.push(sig);       // 古い中身の方は使わない
+    });
+  });
+  return out;
+}
+
+/** 一覧表の「処理日 26/10/27 18:25」→ 2610271825。読めなければ 0。中身ごとに6時間覚える */
+function workListProcessedAt_(f) {
+  var cache = (typeof CacheService !== 'undefined') ? CacheService.getScriptCache() : null;
+  var ck = 'wlproc:' + (f.md5Checksum || f.id);
+  var hit = cache && cache.get(ck);
+  if (hit) return Number(hit);
+  var n = 0;
+  try {
+    var t = toHalfAlnum_(readPdfText_(DriveApp.getFileById(f.id)));
+    var m = t.match(/処理日\s*(\d{2})\/(\d{1,2})\/(\d{1,2})\s+(\d{1,2}):(\d{2})/);
+    var two = function (v) { return ('0' + v).slice(-2); };
+    if (m) n = Number(m[1] + two(m[2]) + two(m[3]) + two(m[4]) + m[5]);
+  } catch (e) {}
+  if (cache) cache.put(ck, String(n), 6 * 60 * 60);
+  return n;
 }
 
 /** 直下のフォルダの ID */
