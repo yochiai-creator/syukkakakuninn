@@ -529,6 +529,19 @@ function loadPdf(fileId) {
   });
   if (meta.mimeType !== PDF_MIME) throw new Error('PDFではありません: ' + meta.name);
 
+  // 作業指示一覧表の訂正版で、まだ前の版のチェックを写していなければ、それも渡す(アプリで写す)
+  if (isWorkListName_(meta.name)) {
+    var carry = workListCarry_(meta);
+    if (carry) {
+      return {
+        id: fileId,
+        name: meta.name,
+        data: Utilities.base64Encode(DriveApp.getFileById(fileId).getBlob().getBytes()),
+        carry: carry
+      };
+    }
+  }
+
   // 訂正版で、まだ前の版をつないでいなければ、前の版も渡す(アプリでつなぐ)
   var prev = previousVersionsToMerge_(meta);
   if (prev.length) {
@@ -808,6 +821,7 @@ function savePdf(req) {
     if (updated.md5Checksum && updated.md5Checksum !== md5) {
       putShelfMarks_(req.fileId, req.marks, updated.md5Checksum, got.marks);   // 念のため合わせる
     }
+    if (req.carry) afterWorkListCarry_(req.fileId);    // 一覧表の訂正版にチェックを写した
     return {
       id: updated.id,
       name: original.name,
@@ -817,8 +831,12 @@ function savePdf(req) {
   }
 
   if (req.mode === 'done') {
+    // 一覧表は、完了したあとも訂正版へチェックを写せるよう、書き込む前のPDFを先に取っておく
+    var wl = isWorkListName_(original.name);
+    var wlBase = wl && req.marks ? baseBlob_(req) : null;
     var done = saveDone_(req.fileId, original, blob);
     trashShelf_(req.fileId, original);
+    if (wl) afterWorkListDone_(done, original, wlBase, req.marks);
     return done;
   }
 
@@ -887,7 +905,7 @@ function saveDone_(fileId, original, blob) {
     var created = Drive.Files.create(
       { name: name, parents: [sizeFolder], description: original.description || '' },
       blob,
-      { supportsAllDrives: true, fields: 'id' }
+      { supportsAllDrives: true, fields: 'id,md5Checksum' }
     );
   } finally {
     lock.releaseLock();
@@ -900,6 +918,7 @@ function saveDone_(fileId, original, blob) {
 
   return {
     id: created.id,
+    md5: created.md5Checksum || '',
     name: name,
     url: fileUrl_(created.id),
     mode: 'done',

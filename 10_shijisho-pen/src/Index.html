@@ -1062,7 +1062,8 @@ function doOpenFile(f){
   toast("読み込み中…");
   google.script.run
     .withSuccessHandler(function(res){
-      if(res.prev && res.prev.length) openRevision(res); else mountPdf(res);
+      if(res.carry) openCarry(res);
+      else if(res.prev && res.prev.length) openRevision(res); else mountPdf(res);
     })
     .withFailureHandler(function(err){ toast("開けませんでした: "+err.message); })
     .loadPdf(f.id);
@@ -1073,6 +1074,100 @@ function doOpenFile(f){
    結んでおく。最初に開いたときに、訂正版のページの後ろへ前の版のページ
    (書き込み・チェック済みのものはそのまま)をつなぎ、Drive にも保存する。
    前の版のページの上には「前の版」の札を付ける。 */
+/* ---------- 作業指示一覧表の訂正版 ----------
+   一覧表の訂正版が届くと、コピーするときに前の版(書き込んだもの・チェック完了したもの)と
+   結んでおく。最初に開いたときに、前の版の書き込みを訂正版へ写して上書き保存する。
+   行の並びが変わることがあるので、依頼No. の行に合わせて写す:
+     書き込みに近い行(上下に半行くらいまで)の依頼No. を前の版で探し、訂正版で同じ依頼No. の
+     行へ、上下のずれだけ動かす。訂正版に無い行の書き込みは写さない。
+     どの行にも近くない書き込み(見出しの印など)は、同じページの同じ場所へ。 */
+var carryPending=false;
+function openCarry(res){
+  var c=res.carry;
+  var plain={id:res.id, name:res.name, data:res.data};
+  if(!c || c.failed){
+    plain.after=function(){ carryPending=true; };      // 次に保存したとき、写し済みにする
+    mountPdf(plain, "一覧表の訂正版です。前の版の書き込みは写せませんでした(前の版に書き込みの記録がありません)");
+    return;
+  }
+  toast("一覧表の訂正版です。前の版の書き込みを写しています…");
+  Promise.all([rowAnchors(b64ToBytes(res.data)), rowAnchors(b64ToBytes(c.base))]).then(function(a){
+    var r=carryMarks(c.marks||{}, a[1], a[0]);
+    var note="一覧表の訂正版です。前の版("+(c.state||"")+")の書き込み "+r.moved+r.kept+" 件を写しました"+
+             (r.dropped ? "。訂正版に無い行の "+r.dropped+" 件は写していません" : "");
+    plain.marks=r.marks;       // pages を付けないので、ページ数が違っても使う
+    plain.after=function(){
+      baseSource="file";       // 書き込む前のPDFは訂正版そのもの(棚にはまだ無い)
+      carryPending=true;
+      if(r.moved+r.kept){ setDirty(true); save("overwrite"); }
+    };
+    mountPdf(plain, note);
+  }).catch(function(err){
+    console.error(err);
+    plain.after=function(){ carryPending=true; };
+    mountPdf(plain, "一覧表の訂正版です。前の版の書き込みを写せませんでした");
+  });
+}
+
+/* 各ページの依頼No.(26-20382-0-1)の行の高さ。ページの上からの割合 */
+function rowAnchors(bytes){
+  return pdfjsLib.getDocument({data: bytes}).promise.then(function(doc){
+    var rows=[], chain=Promise.resolve();
+    for(var p=1;p<=doc.numPages;p++){
+      (function(p){
+        chain=chain.then(function(){ return doc.getPage(p); }).then(function(page){
+          var vp=page.getViewport({scale:1});
+          return page.getTextContent().then(function(tc){
+            tc.items.forEach(function(it){
+              var t=String(it.str||"").replace(/\s+/g,"");
+              if(!/^\d{2}-\d{4,6}-\d+-\d+$/.test(t)) return;
+              var pt=vp.convertToViewportPoint(it.transform[4], it.transform[5]);
+              var h=Math.abs(it.height || it.transform[3] || 0);
+              rows.push({no:t, page:p, y:(pt[1]-h/2)/vp.height});
+            });
+          });
+        });
+      })(p);
+    }
+    return chain.then(function(){ var n=doc.numPages; doc.destroy(); return {pages:n, rows:rows}; });
+  });
+}
+
+/* 前の版の書き込みを、訂正版の同じ依頼No. の行へ動かす */
+var CARRY_ROW_TOL=0.018;     // 行の中心からこの範囲(ページの高さに対する割合。半行くらい)
+function carryMarks(oldMarks, oldA, newA){
+  var byNo={}; newA.rows.forEach(function(r){ if(!byNo[r.no]) byNo[r.no]=r; });
+  var out={}, moved=0, kept=0, dropped=0;
+  Object.keys(oldMarks).forEach(function(k){
+    var p=Number(k);
+    (oldMarks[k]||[]).forEach(function(m){
+      var my = typeof m.y==="number" ? m.y :
+        (m.pts && m.pts.length ? m.pts.reduce(function(a,q){ return a+q.y; },0)/m.pts.length : null);
+      if(my==null) return;
+      var best=null;
+      oldA.rows.forEach(function(r){
+        if(r.page!==p) return;
+        var d=Math.abs(r.y-my);
+        if(d<=CARRY_ROW_TOL && (!best || d<best.d)) best={r:r, d:d};
+      });
+      var np=p, dy=0;
+      if(best){
+        var nr=byNo[best.r.no];
+        if(!nr){ dropped++; return; }
+        np=nr.page; dy=nr.y-best.r.y; moved++;
+      } else {
+        if(p>newA.pages){ dropped++; return; }
+        kept++;
+      }
+      var c=JSON.parse(JSON.stringify(m));
+      if(typeof c.y==="number") c.y+=dy;
+      if(c.pts) c.pts.forEach(function(q){ q.y+=dy; });
+      (out[np]=out[np]||[]).push(c);
+    });
+  });
+  return {marks:out, moved:moved, kept:kept, dropped:dropped};
+}
+
 function openRevision(res){
   toast("訂正版です。前の版をつないでいます…");
   var firstOld = 0;
@@ -1137,6 +1232,7 @@ function labelPng(text){
 
 function mountPdf(res, note){
   curFile={id:res.id, name:res.name};
+  carryPending=false;
   srcBytes=b64ToBytes(res.data);
   marks={}; pageNo=1; setDirty(false); penSeen=false; zoom=1;
   clearPhotos();
@@ -1167,6 +1263,7 @@ function mountPdf(res, note){
     updateZoomLbl();
     markCurrent();
     toast(note || (restored ? curFile.name + "(前回の書き込みを直せます)" : curFile.name));
+    if(res.after) res.after();
   }).catch(function(err){
     console.error(err);
     toast("PDFを表示できませんでした");
@@ -1911,7 +2008,10 @@ function save(mode){
 
   buildPdf(mode==="done").then(function(bytes){
     var req={fileId: curFile.id, data: bytesToB64(bytes), mode: mode};
-    if(mode!=="done"){
+    // 一覧表はチェック完了でも書き込みを送る(訂正版に写せるよう、完了したものにも残す)
+    var wl=parseSortName(curFile.name); wl=!!(wl && wl.list);
+    if(carryPending) req.carry=true;
+    if(mode!=="done" || wl){
       req.marks = JSON.stringify({pages: pageCount, marks: packMarks()});
       req.baseSource = baseSource;
       if(baseSource==="embedded") req.base = bytesToB64(srcBytes);
@@ -1929,6 +2029,7 @@ function save(mode){
     });
   }).then(function(res){
     setDirty(false);
+    carryPending=false;
     if(res.mode==="overwrite") baseSource="shelf";   // もう棚にある
     var savedId = curFile && curFile.id;
     if(savedId) forgetFileInMemo(savedId, res.mode!=="done");

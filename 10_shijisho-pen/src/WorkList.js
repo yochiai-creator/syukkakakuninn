@@ -52,15 +52,46 @@ function copyWorkLists_() {
   var inDest = {};
   listPdfMeta_(dest).forEach(function (f) { if (f.md5Checksum) inDest[f.md5Checksum] = true; });
 
+  var destFiles = listPdfMeta_(dest);
+  var gone = {};      // この回でゴミ箱へ入れた・名前を変えたもの
   listPdfMeta_(WORK_LIST_SRC_ID).forEach(function (f) {
     var key = workListSrcKey_(f.name);
     if (!key || dayNum_(key) < today) return;       // 出荷日を過ぎた一覧表はコピーしない
-    if (copied.indexOf(f.id) >= 0) return;
-    if (f.md5Checksum && inDest[f.md5Checksum]) { copied.push(f.id); return; }
-    var name = uniqueName_(dest, key + '_' + WORK_LIST_FOLDER + '.pdf');
-    Drive.Files.copy({ name: name, parents: [dest] }, f.id, { supportsAllDrives: true });
-    copied.push(f.id);
-    made.push(WORK_LIST_FOLDER + '/' + name);
+    // コピー済みは「ID:中身」で覚える。同じファイルの中身が差し替えられたときも新しい版として扱う
+    var sig = f.id + ':' + (f.md5Checksum || '');
+    if (copied.indexOf(sig) >= 0 || copied.indexOf(f.id) >= 0) return;   // ID だけは以前の覚え方
+    if (f.md5Checksum && inDest[f.md5Checksum]) { copied.push(sig); return; }
+
+    // 同じ日の前の版。書き込んだもの(途中保存)・チェック完了したもののうち新しいもの
+    var base = key + '_' + WORK_LIST_FOLDER;
+    var mine = destFiles.filter(function (d) { return d.name.indexOf(base) === 0 && !gone[d.id]; });
+    var cands = mine.filter(isSaved_).map(function (d) { return { f: d, state: '途中保存' }; })
+      .concat(doneWorkLists_(key).map(function (d) { return { f: d, state: '完了' }; }))
+      .sort(function (a, b) { return a.f.modifiedTime < b.f.modifiedTime ? 1 : -1; });
+    var prev = cands[0] || null;
+
+    // 書き込んでいない前の版は、新しい版に置き換える(ゴミ箱へ)
+    mine.forEach(function (d) {
+      if (isSaved_(d)) return;
+      Drive.Files.update({ trashed: true }, d.id, null, { supportsAllDrives: true });
+      gone[d.id] = true;
+    });
+    // 書き込んだ前の版は、チェックを写し終えるまで「(前の版)」として残す
+    if (prev && prev.state === '途中保存' && prev.f.name !== base + '(前の版).pdf') {
+      Drive.Files.update({ name: base + '(前の版).pdf' }, prev.f.id, null, { supportsAllDrives: true });
+      gone[prev.f.id] = true;
+    }
+
+    var taken = destFiles.filter(function (d) { return !gone[d.id]; }).map(function (d) { return d.name; });
+    var name = base + '.pdf';
+    for (var n = 2; taken.indexOf(name) >= 0; n++) name = base + '_' + n + '.pdf';
+
+    var meta = { name: name, parents: [dest] };
+    if (prev) meta.description = WL_PREV + ':' + prev.f.id + '\n' + WL_PREV_STATE + ':' + prev.state;
+    var c = Drive.Files.copy(meta, f.id, { supportsAllDrives: true, fields: 'id,name' });
+    destFiles.push({ id: c.id, name: name, properties: {}, modifiedTime: new Date().toISOString() });
+    copied.push(sig);
+    made.push(WORK_LIST_FOLDER + '/' + name + (prev ? '  (訂正版。前の版は' + prev.state + ')' : ''));
   });
   props.setProperty(PROP_WL_COPIED, JSON.stringify(copied.slice(-100)));
 
@@ -74,6 +105,88 @@ function copyWorkLists_() {
   });
 
   return { 件数: made.length, 一覧: made, 出荷日超過へ: moved };
+}
+
+// 訂正版の一覧表の説明欄。前の版の ID・状態(途中保存/完了)、チェックを写したら 写し:済
+var WL_PREV = '前の一覧表', WL_PREV_STATE = '前の一覧表の状態', WL_CARRIED = '写し';
+
+/** その日のチェック完了した一覧表(◆チェック完了/<年>/<月>/作業指示一覧表) */
+function doneWorkLists_(key) {
+  var p = key.split('.');
+  var y = findChildFolder_(DONE_FOLDER_ID, (2000 + Number(p[0])) + '年');
+  var m = y && findChildFolder_(y, Number(p[1]) + '月');
+  var w = m && findChildFolder_(m, WORK_LIST_FOLDER);
+  if (!w) return [];
+  return listPdfMeta_(w).filter(function (f) { return f.name.indexOf(key + '_' + WORK_LIST_FOLDER) === 0; });
+}
+
+/**
+ * アプリで訂正版を開いたとき(loadPdf)に渡す、前の版のチェック。
+ * 前の版の棚(書き込む前のPDFと書き込みの一覧)を読む。読めなければ { failed:true }
+ */
+function workListCarry_(meta) {
+  var info = readInfo_(meta.description);
+  if (!info[WL_PREV] || info[WL_CARRIED]) return null;
+  try {
+    var pm = Drive.Files.get(info[WL_PREV], {
+      supportsAllDrives: true, fields: 'id,name,properties,md5Checksum,description'
+    });
+    var sh = readShelf_(pm);
+    if (!sh) return { failed: true, state: info[WL_PREV_STATE] || '' };
+    return { marks: sh.marks, pages: sh.pages, base: Utilities.base64Encode(sh.base.getBytes()),
+             state: info[WL_PREV_STATE] || '' };
+  } catch (e) {
+    return { failed: true, state: info[WL_PREV_STATE] || '' };
+  }
+}
+
+/**
+ * 訂正版にチェックを写して保存したあと(上書き保存)。写し:済 を付け、
+ * 途中保存の前の版はゴミ箱へ(チェック完了した前の版は、訂正版をチェック完了したときに置き換える)
+ */
+function afterWorkListCarry_(fileId) {
+  var meta = Drive.Files.get(fileId, { supportsAllDrives: true, fields: 'id,description' });
+  var info = readInfo_(meta.description);
+  if (!info[WL_PREV] || info[WL_CARRIED]) return;
+  var desc = (meta.description || '') + '\n' + WL_CARRIED + ':済';
+  Drive.Files.update({ description: desc }, fileId, null, { supportsAllDrives: true });
+  if (info[WL_PREV_STATE] === '途中保存') trashWorkList_(info[WL_PREV]);
+}
+
+/** 一覧表をゴミ箱へ。棚の2つも */
+function trashWorkList_(id) {
+  try {
+    var m = Drive.Files.get(id, { supportsAllDrives: true, fields: 'id,properties' });
+    Drive.Files.update({ trashed: true }, id, null, { supportsAllDrives: true });
+    trashShelf_(id, m);
+  } catch (e) {}
+}
+
+/**
+ * 一覧表をチェック完了したとき。あとで訂正版にチェックを写せるよう、完了したファイルにも
+ * 棚(書き込む前のPDFと書き込みの一覧)を作る。訂正版なら、チェック完了した前の版と置き換える。
+ */
+function afterWorkListDone_(done, original, base, marksJson) {
+  if (base && marksJson) {
+    var props = savedProps_();
+    props[SHELF_BASE_PROP] = shelfPut_(shelfNames_(done.id).base, base, null);
+    props[SHELF_MARKS_PROP] = putShelfMarks_(done.id, marksJson, done.md5, null);
+    Drive.Files.update({ properties: props }, done.id, null, { supportsAllDrives: true });
+  }
+  var info = readInfo_(original.description);
+  // 完了したものを開いたときに、もう一度写そうとしないように
+  if (info[WL_PREV] && !info[WL_CARRIED]) {
+    Drive.Files.update({ description: (original.description || '') + '\n' + WL_CARRIED + ':済' },
+                       done.id, null, { supportsAllDrives: true });
+  }
+  if (info[WL_PREV] && info[WL_PREV_STATE] === '完了') {
+    trashWorkList_(info[WL_PREV]);
+    var want = doneName_(original.name).replace(/_\d+(?=\.pdf$)/, '');
+    if (done.name !== want) {
+      Drive.Files.update({ name: want }, done.id, null, { supportsAllDrives: true });
+      done.name = want;
+    }
+  }
 }
 
 /**
