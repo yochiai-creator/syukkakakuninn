@@ -32,10 +32,7 @@ function copyWorkLists() {
   if (!lock.tryLock(5000)) return;
   try {
     var r = copyWorkLists_();
-    if (r.件数) {
-      r.追加分 = step_(makeExtraLists_);     // 新しい一覧表に合わせて追加分を作り直す
-      Logger.log(JSON.stringify(r, null, 2));
-    }
+    if (r.件数) Logger.log(JSON.stringify(r, null, 2));
     return r;
   } finally {
     lock.releaseLock();
@@ -239,7 +236,24 @@ function removeGeneratedWorkLists_() {
 }
 
 
-/* ---------------- 一覧表に載っていない指図書(追加分) ----------------
+/**
+ * 以前作っていた追加分(26.11.02_作業指示一覧表(追加分).pdf)を片付ける。
+ * 自分で作らず、本社から一覧表が出し直されたら差し替える、という形にしたため。
+ * 書き込んだ(途中保存)ものは残す。
+ */
+function removeExtraLists_() {
+  var dest = cachedChildFolder_(SORT_DEST_ROOT_ID, WORK_LIST_FOLDER);
+  var gone = [];
+  listPdfMeta_(dest).forEach(function (f) {
+    if (!isExtraListName_(f.name) || isSaved_(f)) return;
+    trashFile_(f.id);
+    gone.push(f.name);
+  });
+  return { 件数: gone.length, 一覧: gone };
+}
+
+/* ---------------- 一覧表に載っていない指図書(追加分) — いまは使っていない ----------------
+ * (以下は以前の仕組み。振り分けからは呼ばない。要望で、作らずに差し替える形に戻した)
  * 本社の一覧表は出荷日の数日前に一度だけ出ることがあり、そのあとに届いた指図書は
  * 載っていない(11/2分は 10/27 に出て、10/29〜30 に届いた下松・あがつま などが無い)。
  * そこで、その日の一覧表に載っていない指図書だけを「追加分」の一覧にして、

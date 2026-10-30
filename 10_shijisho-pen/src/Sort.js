@@ -137,7 +137,7 @@ function runSort() {
     put_(r, '途中保存の目印を付けた', step_(markSavedCopies_));
     // 本社から届いた作業指示一覧表を容器種類別へコピーする(15分ごとにも見ている)
     put_(r, '作業指示一覧表をコピーした', step_(copyWorkLists_));
-    put_(r, '一覧表に載っていない指図書(追加分)', step_(makeExtraLists_));
+    put_(r, '作っていた追加分を片付けた', step_(removeExtraLists_));
     put_(r, '自動で作っていた一覧を片付けた', step_(removeGeneratedWorkLists_));
     put_(r, '表に足した得意先', step_(function () { return appendUnknownCustomers_(r.未登録); }));
 
