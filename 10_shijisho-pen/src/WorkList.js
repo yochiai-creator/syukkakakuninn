@@ -32,7 +32,10 @@ function copyWorkLists() {
   if (!lock.tryLock(5000)) return;
   try {
     var r = copyWorkLists_();
-    if (r.件数) Logger.log(JSON.stringify(r, null, 2));
+    if (r.件数) {
+      r.追加分 = step_(makeExtraLists_);     // 新しい一覧表に合わせて追加分を作り直す
+      Logger.log(JSON.stringify(r, null, 2));
+    }
     return r;
   } finally {
     lock.releaseLock();
@@ -64,9 +67,12 @@ function copyWorkLists_() {
 
     // 同じ日の前の版。書き込んだもの(途中保存)・チェック完了したもののうち新しいもの
     var base = key + '_' + WORK_LIST_FOLDER;
-    var mine = destFiles.filter(function (d) { return d.name.indexOf(base) === 0 && !gone[d.id]; });
+    var mine = destFiles.filter(function (d) {
+      return d.name.indexOf(base) === 0 && !gone[d.id] && !isExtraListName_(d.name);
+    });
     var cands = mine.filter(isSaved_).map(function (d) { return { f: d, state: '途中保存' }; })
-      .concat(doneWorkLists_(key).map(function (d) { return { f: d, state: '完了' }; }))
+      .concat(doneWorkLists_(key).filter(function (d) { return !isExtraListName_(d.name); })
+        .map(function (d) { return { f: d, state: '完了' }; }))
       .sort(function (a, b) { return a.f.modifiedTime < b.f.modifiedTime ? 1 : -1; });
     var prev = cands[0] || null;
 
@@ -230,4 +236,199 @@ function removeGeneratedWorkLists_() {
     gone.push(f.name);
   });
   return { 件数: gone.length, 一覧: gone };
+}
+
+
+/* ---------------- 一覧表に載っていない指図書(追加分) ----------------
+ * 本社の一覧表は出荷日の数日前に一度だけ出ることがあり、そのあとに届いた指図書は
+ * 載っていない(11/2分は 10/27 に出て、10/29〜30 に届いた下松・あがつま などが無い)。
+ * そこで、その日の一覧表に載っていない指図書だけを「追加分」の一覧にして、
+ * 同じフォルダに 26.11.02_作業指示一覧表(追加分).pdf で置く。チェックの流れは一覧表と同じ。
+ *
+ *   載っているかどうか … 一覧表の文字から依頼No.(26-30618-0-1)と容器No.(HEP64119)を読み、
+ *                        コピーの説明欄「一覧表の依頼No」に覚える(読むのは1回だけ)。
+ *                        依頼No. か、最初の容器No. が載っていれば載っているとみなす
+ *   作り直し         … 書き込む前なら、中身が変わったら作り直す。書き込んだ・チェック完了した
+ *                        追加分は触らず、そのあと増えたぶんを (追加分2) で作る
+ */
+var WL_EXTRA = '追加分';
+var WL_ON_LIST = '一覧表の依頼No';
+var WL_EXTRA_ORDERS = '追加分の依頼No';
+var WL_EXTRA_HASH = '追加分の中身';
+var EXTRA_BUDGET_MS = 90 * 1000;
+
+function isExtraListName_(name) {
+  return String(name).indexOf('(' + WL_EXTRA) >= 0;
+}
+
+/** 26-30618-0(2) → '26-30618-0#2'。(n) が無いものは 1 */
+function orderKey_(no) {
+  var m = String(no).match(/^(\d{2}-\d+-\d+)(?:\((\d+)\))?$/);
+  return m ? m[1] + '#' + Number(m[2] || 1) : String(no);
+}
+
+/** 本社の一覧表に載っている依頼No.(26-30618-0#1)と容器No.(HEP64119)。初回だけ読んで説明欄に覚える */
+function officialKeys_(f) {
+  var v = readInfo_(f.description)[WL_ON_LIST];
+  if (v == null) {
+    var t = toHalfAlnum_(readPdfText_(DriveApp.getFileById(f.id)));
+    var keys = {};
+    (t.match(/\d{2}-\d{4,6}-\d+-\d+/g) || []).forEach(function (s) {
+      var m = s.match(/^(.*)-(\d+)$/);
+      keys[m[1] + '#' + Number(m[2])] = 1;
+    });
+    (t.replace(/\s+/g, '').match(/[A-Z]{3}\d{5}/g) || []).forEach(function (c) { keys[c] = 1; });
+    v = Object.keys(keys).join(',');
+    var desc = (f.description ? f.description + '\n' : '') + WL_ON_LIST + ':' + v;
+    Drive.Files.update({ description: desc }, f.id, null, { supportsAllDrives: true });
+    f.description = desc;
+  }
+  return v ? v.split(',') : [];
+}
+
+function makeExtraLists_() {
+  var started = Date.now();
+  var w = workIndex_();
+  var dest = cachedChildFolder_(SORT_DEST_ROOT_ID, WORK_LIST_FOLDER);
+  var destFiles = listPdfMeta_(dest);
+  var made = [], left = 0;
+
+  // 今日以降で、一覧表(コピー)がある日
+  var keys = {};
+  destFiles.forEach(function (f) {
+    var m = f.name.match(/^(\d{2}\.\d{2}\.\d{2})_作業指示一覧表/);
+    if (m && dayNum_(m[1]) >= w.today) keys[m[1]] = true;
+  });
+  Object.keys(keys).sort(function (a, b) { return dayNum_(a) - dayNum_(b); }).forEach(function (key) {
+    var base = key + '_' + WORK_LIST_FOLDER;
+    var all = destFiles.filter(function (f) { return f.name.indexOf(base) === 0; })
+      .map(function (f) { return { f: f, done: false }; })
+      .concat(doneWorkLists_(key).map(function (f) { return { f: f, done: true }; }));
+    var officials = all.filter(function (x) {
+      return !isExtraListName_(x.f.name) && x.f.name.indexOf('(前の版)') < 0;
+    });
+    if (!officials.length) return;
+
+    if (Date.now() - started > EXTRA_BUDGET_MS) { left++; return; }
+    var on = {};
+    officials.forEach(function (x) { officialKeys_(x.f).forEach(function (k) { on[k] = true; }); });
+
+    var extras = all.filter(function (x) { return isExtraListName_(x.f.name); });
+    var fixed = {}, nFixed = 0;
+    extras.forEach(function (x) {
+      if (!x.done && !isSaved_(x.f)) return;
+      nFixed++;
+      String(readInfo_(x.f.description)[WL_EXTRA_ORDERS] || '').split(',').forEach(function (n) { if (n) fixed[n] = true; });
+    });
+    var open = extras.filter(function (x) { return !x.done && !isSaved_(x.f); });
+    var rows = workRowsOf_(w.rows[key]).filter(function (r) {
+      return !on[orderKey_(r.no)] && !on[firstContainer_(r.range)] && !fixed[r.no];
+    });
+
+    if (!rows.length) { open.forEach(function (x) { trashFile_(x.f.id); }); return; }
+
+    var name = base + '(' + WL_EXTRA + (nFixed ? nFixed + 1 : '') + ').pdf';
+    var hash = workListHash_(rows);
+    var keep = open[0];
+    open.slice(1).forEach(function (x) { trashFile_(x.f.id); });   // 二重にできていたら1つに
+    if (keep && readInfo_(keep.f.description)[WL_EXTRA_HASH] === hash && keep.f.name === name) return;
+    if (Date.now() - started > EXTRA_BUDGET_MS || overBudget_()) { left++; return; }
+
+    var desc = WL_EXTRA_ORDERS + ':' + rows.map(function (r) { return r.no; }).join(',') + '\n' +
+               WL_EXTRA_HASH + ':' + hash;
+    var blob = extraListPdf_(key, rows, nFixed + 1).setName(name);
+    if (keep) {
+      Drive.Files.update({ name: name, description: desc }, keep.f.id, blob, { supportsAllDrives: true });
+    } else {
+      Drive.Files.create({ name: name, parents: [dest], description: desc, mimeType: MimeType.PDF },
+                         blob, { supportsAllDrives: true });
+    }
+    made.push(WORK_LIST_FOLDER + '/' + name + '  ' + rows.length + '件' + (keep ? '(作り直し)' : ''));
+  });
+
+  return { 件数: made.length, 一覧: made, 残り: left };
+}
+
+/** 一覧に載せる中身が変わったかを見る指紋。状態(完了など)は入れない */
+function workListHash_(rows) {
+  var s = JSON.stringify(rows.map(function (r) {
+    return [r.no, r.to, r.qty, r.range, r.time, r.item, r.kg];
+  }));
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, s, Utilities.Charset.UTF_8)
+    .map(function (b) { return ('0' + (b & 255).toString(16)).slice(-2); }).join('');
+}
+
+function trashFile_(id) {
+  try { Drive.Files.update({ trashed: true }, id, null, { supportsAllDrives: true }); } catch (e) {}
+}
+
+/** HTML を Google ドキュメントに変換してから PDF で取り出す(日本語と罫線がきれいに出る) */
+function extraListPdf_(key, rows, n) {
+  var doc = null;
+  try {
+    doc = Drive.Files.create(
+      { name: 'wl_' + Utilities.getUuid(), mimeType: MimeType.GOOGLE_DOCS },
+      Utilities.newBlob(extraListHtml_(key, rows, n), 'text/html', 'wl.html')
+    );
+    return DriveApp.getFileById(doc.id).getAs(MimeType.PDF);
+  } finally {
+    if (doc && doc.id) {
+      try { DriveApp.getFileById(doc.id).setTrashed(true); } catch (e) {}
+    }
+  }
+}
+
+/** 26-30114-0(1) → 26-30114-0-1(一覧表と同じ書き方) */
+function listStyleNo_(no) {
+  return String(no).replace(/\((\d+)\)$/, '-$1');
+}
+
+function extraListHtml_(key, rows, n) {
+  var esc = function (s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  };
+  var p = key.split('.');
+  var d = new Date(2000 + Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+  var label = (2000 + Number(p[0])) + '/' + Number(p[1]) + '/' + Number(p[2]) +
+              '(' + '日月火水木金土'.charAt(d.getDay()) + ')';
+  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
+  var madeAt = Utilities.formatDate(new Date(), tz, 'M/d HH:mm');
+
+  var td = 'style="border:1px solid #555;padding:8pt 4pt;font-size:10pt;vertical-align:middle;"';
+  var th = 'style="border:1px solid #555;padding:4pt;font-size:9pt;background-color:#e8e8e8;"';
+  var gh = 'style="border:1px solid #555;padding:4pt;font-size:10pt;font-weight:bold;background-color:#f3f3f3;"';
+  var cols = [['依頼No', 17], ['出荷先', 25], ['品名', 16], ['数量', 7], ['容器番号', 20], ['時間指定', 8], ['確認', 7]];
+
+  var h = [];
+  h.push('<html><head><meta charset="utf-8"></head><body style="font-family:sans-serif;">');
+  h.push('<p style="font-size:15pt;font-weight:bold;margin:0;">作業指示一覧表 追加分' + (n > 1 ? n : '') +
+         '  出荷日：' + esc(label) + '</p>');
+  h.push('<p style="font-size:9pt;margin:2pt 0 8pt 0;">本社の作業指示一覧表に載っていない指図書(一覧表が出たあとに届いたもの)。' +
+         '振り分けたコピーから作っています。 作成 ' + esc(madeAt) + '</p>');
+  h.push('<table style="border-collapse:collapse;width:100%;"><tr>');
+  cols.forEach(function (c) { h.push('<th ' + th + ' width="' + c[1] + '%">' + c[0] + '</th>'); });
+  h.push('</tr>');
+  var lastKg = null;
+  rows.forEach(function (r) {
+    if (r.kg !== lastKg) {
+      lastKg = r.kg;
+      var same = rows.filter(function (x) { return x.kg === r.kg; });
+      var q = same.reduce(function (a, x) { return a + (Number(x.qty) || 0); }, 0);
+      var size = r.kg === BULK_KG ? 'バルク' : r.kg ? r.kg + 'kg' : 'サイズ不明';
+      h.push('<tr><td ' + gh + ' colspan="7">' + esc(size) + '  ' + same.length + '件 · ' + q + '本</td></tr>');
+    }
+    h.push('<tr>');
+    h.push('<td ' + td + '>' + esc(listStyleNo_(r.no)) + '</td>');
+    h.push('<td ' + td + '>' + esc(r.to) + '</td>');
+    h.push('<td ' + td + '>' + esc(r.item) + '</td>');
+    h.push('<td ' + td + ' align="right">' + (r.qty ? esc(r.qty) : '—') + '</td>');
+    h.push('<td ' + td + '>' + esc(String(r.range || '').replace('~', ' 〜 ')) + '</td>');
+    h.push('<td ' + td + '>' + esc(r.time) + '</td>');
+    h.push('<td ' + td + '>&nbsp;</td>');
+    h.push('</tr>');
+  });
+  h.push('</table></body></html>');
+  return h.join('');
 }
