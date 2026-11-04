@@ -187,6 +187,8 @@
   .row.tr .st{font-size:12px; color:#6b6e75; text-align:right;}
   .row.tr .st .tag{margin:0;}
   .row.tr .sub{display:block; font-size:11px; color:#8a8d94; font-weight:400;}
+  .row.tr .meta{display:block; margin-top:2px; font-size:13px; font-weight:400; color:#4a4d54;
+    font-variant-numeric:tabular-nums; word-break:normal;}
 
   /* ---------- 作業指示一覧(簡易版) ---------- */
   .row.tr.wlist .no, .row.tr.wlist .to{font-weight:700; color:#0b4f6c;}
@@ -818,6 +820,13 @@ function revTag(prevKey){
   return t;
 }
 
+/* HEP69901~HEP69908 → HEP69901〜69908(頭の英字が同じなら後ろは数字だけ) */
+function shortRange(r){
+  var m=String(r||"").match(/^([A-Z]+)(\d+)~([A-Z]+)(\d+)$/);
+  if(!m) return String(r||"").replace("~","〜");
+  return m[1]+m[2]+"〜"+(m[1]===m[3] ? m[4] : m[3]+m[4]);
+}
+
 function dayFileRow(f){
   var p=parseSortName(f.name);
   var d=document.createElement("div");
@@ -827,6 +836,12 @@ function dayFileRow(f){
   var to=document.createElement("span"); to.className="to"; to.textContent=p.to;
   if(p.sub){ var sb=document.createElement("span"); sb.className="sub"; sb.textContent=p.sub; to.appendChild(sb); }
   if(f.rev){ var rv=document.createElement("span"); rv.className="sub"; rv.appendChild(revTag(f.rev)); to.appendChild(rv); }
+  if(!p.list && (f.range || f.qty)){
+    // 容器No. と本数(振り分けで読んだもの)。HEP69901〜HEP69908 · 8本
+    var mt=document.createElement("span"); mt.className="meta";
+    mt.textContent=[shortRange(f.range), f.qty ? f.qty+"本" : ""].filter(Boolean).join(" · ");
+    to.appendChild(mt);
+  }
   var st=document.createElement("span"); st.className="st";
   if(f.saved){
     var t=document.createElement("em"); t.className="tag"; t.style.fontStyle="normal";

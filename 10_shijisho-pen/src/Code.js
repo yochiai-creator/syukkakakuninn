@@ -67,7 +67,9 @@ function fileInfo_(f) {
     modified: f.modifiedTime,
     saved: isSaved_(f),
     savedAt: isSaved_(f) ? (f.properties[SAVED_AT_PROP] || f.modifiedTime) : '',
-    rev: readInfo_(f.description)[INFO_PREV_DATE] || ''     // 訂正版なら前の版の出荷日
+    rev: readInfo_(f.description)[INFO_PREV_DATE] || '',    // 訂正版なら前の版の出荷日
+    qty: readInfo_(f.description)[INFO_QTY] || '',          // 日にちの一覧に出す本数と容器No.
+    range: readInfo_(f.description)[INFO_RANGE] || ''
   };
 }
 
