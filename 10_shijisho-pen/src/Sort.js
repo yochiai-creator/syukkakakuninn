@@ -672,7 +672,7 @@ function sortOne_(file, sizeFolders, doneNames, result) {
 
   // 得意先コードと数量などをファイルの説明に残す。あとでマスタの会社名が
   // 直されたとき、OCR をやり直さずにこのコピーの名前を直せる。
-  // 数量などはアプリの作業指示一覧(簡易版)に使う。
+  // 数量・容器No. はアプリの日にちの一覧に出す。
   var info = extractOrderInfo_(text);
   if (code) info[INFO_CODE] = code;
   info[INFO_SIZE] = sizeLabel_(size);   // 振り分けで決めたサイズ。チェック完了の仕分けに使う

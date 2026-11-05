@@ -310,30 +310,7 @@ function listPdfs() {
 }
 
 
-/* ---------------- 作業指示一覧(簡易版) ---------------- */
-
-/**
- * 出荷日ごとの作業指示を、容器サイズを横断して返す。
- * 正式な作業指示一覧表は当日にしか出ないので、振り分けたコピーの名前と
- * 説明欄(数量など)から作る。チェック完了したものは ◆チェック完了 から拾う。
- *
- * @param {string} dayKey '26.09.29'。空なら今日(無ければ次の出荷日)
- * @return {{days:Array, day:string, rows:Array}}
- */
-function workSheet(dayKey) {
-  var w = workIndex_();
-  var dayList = w.dayList, days = w.days, rows = w.rows, today = w.today;
-
-  if (!dayKey || !days[dayKey]) {
-    dayKey = '';
-    for (var i = 0; i < dayList.length; i++) {
-      if (dayNum_(dayList[i].key) >= today) { dayKey = dayList[i].key; break; }
-    }
-    if (!dayKey && dayList.length) dayKey = dayList[dayList.length - 1].key;
-  }
-
-  return { days: dayList, day: dayKey, today: String(today), rows: workRowsOf_(rows[dayKey]) };
-}
+/* ---------------- 日にちごとのまとめ(容器サイズ横断) ---------------- */
 
 /** '26.10.26' → 20261026 */
 function dayNum_(key) {
