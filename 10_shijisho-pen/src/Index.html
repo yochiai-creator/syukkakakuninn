@@ -187,6 +187,9 @@
   .row.tr .st{font-size:12px; color:#6b6e75; text-align:right;}
   .row.tr .st .tag{margin:0;}
   .row.tr .sub{display:block; font-size:11px; color:#8a8d94; font-weight:400;}
+  .row.tr.grpOpen{background:#eef4f8;}
+  .row.tr.grpOpen .no, .row.tr.grpOpen .to{color:#0b4f6c; font-weight:700;}
+  .row.tr.grpOpen .st{font-size:20px; color:#0b4f6c;}
   .row.tr .meta{display:block; margin-top:2px; font-size:13px; font-weight:400; color:#4a4d54;
     font-variant-numeric:tabular-nums; word-break:normal;}
 
@@ -385,6 +388,7 @@ var pdfCv=$("#pdfLayer"), inkCv=$("#inkLayer");
 var pdfCtx=pdfCv.getContext("2d"), inkCtx=inkCv.getContext("2d");
 
 var srcBytes=null, pdfDoc=null, curFile=null;
+var grp=null;   // 分かれた指図書をまとめて開いているとき: [{id,name,no,bytes,marks,start,pages,baseSource}]
 var pageNo=1, pageCount=0, marks={}, dirty=false;
 var view={w:0,h:0,dpr:1};
 var zoom=1, fitScale=1;
@@ -583,8 +587,12 @@ $("#saveDone").onclick = function(){
     ? "現品の写真 " + photos.length + " 枚を末尾に追加します。\n\n"
     : "現品の写真はまだありません。\n\n";
 
+  if(grp) photoLine = photos.length
+    ? "現品の写真 " + photos.length + " 枚を、撮ったときに開いていた指図書の末尾に追加します。\n\n"
+    : photoLine;
   ask(photoLine + "チェック完了として ◆チェック完了 に保存します。\n\n保存後、元の "
-    + curFile.name + " はゴミ箱へ移動します。\n(30日間は Drive のゴミ箱から戻せます)",
+    + (grp ? grp.map(partLabel).join("") + " の " + grp.length + " 枚" : curFile.name)
+    + " はゴミ箱へ移動します。\n(30日間は Drive のゴミ箱から戻せます)",
     function(){ save("done"); },
     photos.length ? null : { yes:"写真なしで保存", extra:{ label:"写真を撮る", fn:function(){
         $("#photoInput").click();
@@ -806,11 +814,17 @@ function renderDay(data, day){
   });
   box.appendChild(th);
 
-  day.files.slice().sort(function(a,b){
+  var sorted=day.files.slice().sort(function(a,b){
     var pa=parseSortName(a.name), pb=parseSortName(b.name);
     if(!!pa.list!==!!pb.list) return pa.list ? -1 : 1;      // 作業指示一覧を先頭に
     return pa.no<pb.no ? -1 : pa.no>pb.no ? 1 : (a.name<b.name ? -1 : 1);
-  }).forEach(function(f){ box.appendChild(dayFileRow(f)); });
+  });
+  var groups=splitGroups(sorted), shown={};
+  sorted.forEach(function(f){
+    var g=groups[orderBase(parseSortName(f.name))];
+    if(g && !shown[g.base]){ shown[g.base]=true; box.appendChild(groupRow(g)); }
+    box.appendChild(dayFileRow(f));
+  });
 }
 
 /* 「訂正版」の札。前の版の出荷日を添える */
@@ -830,7 +844,7 @@ function shortRange(r){
 function dayFileRow(f){
   var p=parseSortName(f.name);
   var d=document.createElement("div");
-  d.className="row tr" + (p.list ? " wlist" : "") + (f.saved ? " saved" : "") + (curFile && curFile.id===f.id ? " cur" : "");
+  d.className="row tr" + (p.list ? " wlist" : "") + (f.saved ? " saved" : "") + (curFile && (curFile.id===f.id || isGrpMember(f.id)) ? " cur" : "");
   d.dataset.id=f.id;
   var no=document.createElement("span"); no.className="no"; no.textContent=p.no;
   var to=document.createElement("span"); to.className="to"; to.textContent=p.to;
@@ -897,7 +911,7 @@ function refreshFiles(){ openFolder(curFolder ? curFolder.id : ""); }
 /* 開いているファイルの行にだけ印を付ける(一覧は取り直さない) */
 function markCurrent(){
   document.querySelectorAll("#files .row").forEach(function(r){
-    r.classList.toggle("cur", !!curFile && r.dataset.id===curFile.id);
+    r.classList.toggle("cur", !!curFile && (r.dataset.id===curFile.id || isGrpMember(r.dataset.id)));
   });
 }
 
@@ -1084,6 +1098,242 @@ function doOpenFile(f){
     .loadPdf(f.id);
 }
 
+/* ---------- 分かれた指図書をまとめて開く ----------
+   100本口などで、同じ依頼No. の指図書が (1)(2)(3)… に分かれて届くことがある
+   (容器置場ごと。BC は通し番号)。日にちの一覧で、同じ出荷日・同じ依頼No. の
+   ものが2枚以上あれば「まとめて開く」を出す。開くと1つにつないで見せ、
+   保存するときに書き込みをそれぞれの指図書に分けて戻す(サーバーには1枚ずつ送る)。
+   現品の写真は、撮ったときに開いていた指図書に付ける。
+   訂正版(前の版をまだつないでいないもの)と作業指示一覧表、別名で保存したものは入れない。 */
+function orderBase(p){
+  if(!p || p.list || p.sub) return "";
+  return String(p.no).replace(/\(\d+\)$/, "");
+}
+function orderPart(p){
+  var m=String(p && p.no || "").match(/\((\d+)\)$/);
+  return m ? Number(m[1]) : 0;
+}
+function partLabel(m){ return "(" + (m.part || 1) + ")"; }
+
+/* 日にちのファイルから、2枚以上ある依頼をまとめる: base → {base, files, qty} */
+function splitGroups(files){
+  var by={};
+  files.forEach(function(f){
+    var p=parseSortName(f.name), b=orderBase(p);
+    if(!b) return;
+    (by[b] = by[b] || {base:b, files:[]}).files.push(f);
+  });
+  var out={};
+  Object.keys(by).forEach(function(b){
+    var g=by[b];
+    if(g.files.length<2) return;
+    g.files.sort(function(x,y){ return orderPart(parseSortName(x.name))-orderPart(parseSortName(y.name)); });
+    var q=0, all=true;
+    g.files.forEach(function(f){ var n=Number(f.qty); if(n) q+=n; else all=false; });
+    g.qty = all ? q : 0;
+    out[b]=g;
+  });
+  return out;
+}
+
+function groupRow(g){
+  var d=document.createElement("div");
+  d.className="row tr grpOpen";
+  var no=document.createElement("span"); no.className="no"; no.textContent=g.base;
+  var to=document.createElement("span"); to.className="to";
+  var parts=g.files.map(function(f){ return "(" + (orderPart(parseSortName(f.name))||1) + ")"; }).join("");
+  to.textContent="まとめて開く " + parts;
+  var mt=document.createElement("span"); mt.className="meta";
+  mt.textContent=g.files.length + "枚" + (g.qty ? " · 合計 " + g.qty + "本" : "");
+  to.appendChild(mt);
+  var st=document.createElement("span"); st.className="st"; st.textContent="\u203a";
+  d.appendChild(no); d.appendChild(to); d.appendChild(st);
+  d.onclick=function(){ openGroup(g.files); };
+  return d;
+}
+
+function isGrpMember(id){
+  return !!grp && grp.some(function(m){ return m.id===id; });
+}
+function grpMemberAt(page){
+  if(!grp) return null;
+  for(var i=0;i<grp.length;i++){
+    var m=grp[i];
+    if(page>=m.start && page<m.start+m.pages) return m;
+  }
+  return null;
+}
+
+function openGroup(files){
+  if(dirty){
+    ask("未保存の書き込みがあります。\n破棄してまとめて開きますか?", function(){ doOpenGroup(files); });
+    return;
+  }
+  doOpenGroup(files);
+}
+
+function loadOne(id){
+  return new Promise(function(resolve, reject){
+    google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).loadPdf(id);
+  });
+}
+
+/* loadPdf の返事から、書き込む前のPDFと書き込みを取り出す */
+function prepMember(res, f){
+  var p=parseSortName(f.name);
+  var m={id:res.id, name:res.name, no:p ? p.no : res.name, part:orderPart(p) || 1,
+         bytes:b64ToBytes(res.data), marks:{}, baseSource:"file"};
+  return pdfjsLib.getDocument({data: m.bytes.slice()}).promise.then(function(doc){
+    if(res.marks && (!res.pages || res.pages===doc.numPages)){
+      m.marks=res.marks; m.baseSource="shelf"; m.pages=doc.numPages;
+      doc.destroy();
+      return m;
+    }
+    return restoreEditable(doc).then(function(r){
+      if(r.restored){ m.bytes=r.bytes; m.marks=r.marks; m.baseSource="embedded"; }
+      m.pages=r.doc.numPages;
+      r.doc.destroy();
+      return m;
+    });
+  });
+}
+
+function doOpenGroup(files){
+  closeDrawer();
+  toast("まとめて読み込み中…(" + files.length + "枚)");
+  Promise.all(files.map(function(f){ return loadOne(f.id); })).then(function(list){
+    // 訂正版のつなぎ・一覧表の写しは1枚ずつの流れで済ませる
+    for(var i=0;i<list.length;i++){
+      if(list[i].carry || (list[i].prev && list[i].prev.length)){
+        toast("訂正版が入っているので、" + files[i].name + " だけ開きます");
+        doOpenFile(files[i]);
+        return null;
+      }
+    }
+    return Promise.all(list.map(function(res, i){ return prepMember(res, files[i]); }));
+  }).then(function(members){
+    if(!members) return;
+    // 1つにつなぐ。書き込みのページ番号も通し番号に直す
+    var D=PDFLib.PDFDocument, all={}, start=1;
+    members.forEach(function(m){
+      m.start=start;
+      Object.keys(m.marks||{}).forEach(function(k){
+        var n=parseInt(k,10);
+        if(n>=1 && n<=m.pages && (m.marks[k]||[]).length) all[String(start+n-1)]=m.marks[k];
+      });
+      start+=m.pages;
+    });
+    return D.create().then(function(out){
+      var chain=Promise.resolve();
+      members.forEach(function(m){
+        chain=chain.then(function(){ return D.load(m.bytes.slice()); })
+          .then(function(src){ return out.copyPages(src, src.getPageIndices()); })
+          .then(function(pages){ pages.forEach(function(pg){ out.addPage(pg); }); });
+      });
+      return chain.then(function(){ return out.save(); });
+    }).then(function(bytes){
+      curFile={id:members[0].id, name:members[0].no.replace(/\(\d+\)$/, "") + " " + members.map(partLabel).join("")};
+      grp=members;
+      carryPending=false;
+      srcBytes=bytes;
+      marks=all; pageNo=1; setDirty(false); penSeen=false; zoom=1;
+      clearPhotos();
+      baseSource="file";
+      return pdfjsLib.getDocument({data: bytes.slice()}).promise;
+    }).then(function(doc){
+      showDoc(doc);
+      return renderPage();
+    }).then(function(){
+      updateNav();
+      updateZoomLbl();
+      markCurrent();
+      toast(curFile.name + " をまとめて開きました(" + pageCount + "ページ)");
+    });
+  }).catch(function(err){
+    console.error(err);
+    toast("まとめて開けませんでした: " + (err && err.message || err));
+  });
+}
+
+/* まとめて開いたものの保存。1枚ずつ、その指図書のページの書き込みだけを送る */
+function saveGroup(mode){
+  if(mode!=="overwrite" && mode!=="done") return;
+  var btns=[$("#saveOver"), $("#saveDone")];
+  var label = mode==="overwrite" ? $("#saveOver") : $("#saveDone");
+  var old = label.textContent;
+  btns.forEach(function(b){ b.disabled=true; });
+  var members=grp.slice(), okParts=[], i=0;
+
+  var one=function(m){
+    var mk={}, has=false;
+    for(var n=1;n<=m.pages;n++){
+      var list=marks[String(m.start+n-1)];
+      if(list && list.length){ mk[String(n)]=list; has=true; }
+    }
+    // 一度も保存していない、書き込みも無い指図書は、上書きしても何も変わらない
+    if(mode==="overwrite" && !has && m.baseSource==="file") return Promise.resolve();
+    var ph=[];
+    photos.forEach(function(b, k){ if(grpMemberAt(photoPages[k]||1)===m) ph.push(b); });
+    return buildPdfFrom(m.bytes, mk, mode==="done" ? ph : null).then(function(bytes){
+      var req={fileId:m.id, data:bytesToB64(bytes), mode:mode};
+      if(mode!=="done"){
+        req.marks=JSON.stringify({pages:m.pages, marks:mk});
+        req.baseSource=m.baseSource;
+        if(m.baseSource==="embedded") req.base=bytesToB64(m.bytes);
+      }
+      var send=function(r){
+        return new Promise(function(resolve, reject){
+          google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).savePdf(r);
+        });
+      };
+      return send(req).catch(function(err){
+        if(String(err && err.message || err).indexOf("NEED_BASE") < 0) throw err;
+        req.base=bytesToB64(m.bytes);
+        return send(req);
+      });
+    }).then(function(){
+      if(mode==="overwrite") m.baseSource="shelf";
+      okParts.push(partLabel(m));
+      forgetFileInMemo(m.id, mode!=="done");
+    });
+  };
+
+  var next=function(){
+    if(i>=members.length) return Promise.resolve();
+    var m=members[i++];
+    label.textContent="保存中… " + i + "/" + members.length;
+    return one(m).then(next);
+  };
+
+  next().then(function(){
+    setDirty(false);
+    if(mode==="done"){
+      toast("チェック完了 " + members.map(partLabel).join("") + " を保存、元ファイルはゴミ箱へ");
+      clearPhotos();
+      closeFile();
+    } else {
+      toast("上書き保存しました " + (okParts.length ? okParts.join("") : "(書き込みなし)"));
+    }
+    refreshFiles();
+  }).catch(function(err){
+    console.error(err);
+    var m=members[i-1];
+    if(mode==="done"){
+      // できた分はもうチェック完了にある。残りは一覧から開き直す
+      toast((okParts.length ? okParts.join("") + " はチェック完了。" : "") +
+            partLabel(m) + " で保存できませんでした: " + (err.message||err) + "。残りは一覧から開き直してください");
+      clearPhotos();
+      closeFile();
+      refreshFiles();
+    } else {
+      toast(partLabel(m) + " を保存できませんでした: " + (err.message||err));
+    }
+  }).then(function(){
+    if(grp) btns.forEach(function(b){ b.disabled=false; });
+    label.textContent=old;
+  });
+}
+
 /* ---------- 訂正版 ----------
    同じ依頼No. で出荷日が変わった指図書(訂正版)が届くと、振り分けが前の版と
    結んでおく。最初に開いたときに、訂正版のページの後ろへ前の版のページ
@@ -1247,6 +1497,7 @@ function labelPng(text){
 
 function mountPdf(res, note){
   curFile={id:res.id, name:res.name};
+  grp=null;
   carryPending=false;
   srcBytes=b64ToBytes(res.data);
   marks={}; pageNo=1; setDirty(false); penSeen=false; zoom=1;
@@ -1264,14 +1515,11 @@ function mountPdf(res, note){
     return restoreEditable(doc).then(function(r){
       restored=r.restored;
       baseSource = r.restored ? "embedded" : "file";
+      if(r.restored){ srcBytes=r.bytes; marks=r.marks; }
       return r.doc;
     });
   }).then(function(doc){
-    pdfDoc=doc; pageCount=doc.numPages;
-    hint.hidden=true; sheet.hidden=false;
-    ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl","photo","closeBtn"].forEach(function(id){
-      $("#"+id).disabled=false;
-    });
+    showDoc(doc);
     return renderPage();
   }).then(function(){
     updateNav();
@@ -1283,6 +1531,16 @@ function mountPdf(res, note){
     console.error(err);
     toast("PDFを表示できませんでした");
   });
+}
+
+/* 開いたPDFを画面に出せる状態にする。まとめて開いたときは別名保存は使わない */
+function showDoc(doc){
+  pdfDoc=doc; pageCount=doc.numPages;
+  hint.hidden=true; sheet.hidden=false;
+  ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl","photo","closeBtn"].forEach(function(id){
+    $("#"+id).disabled=false;
+  });
+  if(grp) $("#saveCopy").disabled=true;
 }
 
 /* ---------- 書き込みを後から直せるようにする ----------
@@ -1316,10 +1574,8 @@ function restoreEditable(doc){
     return pdfjsLib.getDocument({data: baseBytes.slice()}).promise.then(function(baseDoc){
       // ページ数が合わないものは、別のPDFの添付とみなして使わない
       if(baseDoc.numPages !== data.pages){ baseDoc.destroy(); return {doc:doc, restored:false}; }
-      srcBytes = baseBytes;
-      marks = data.marks;
       doc.destroy();
-      return {doc:baseDoc, restored:true};
+      return {doc:baseDoc, restored:true, bytes:baseBytes, marks:data.marks};
     });
   }).catch(function(err){
     console.warn("書き込みを戻せませんでした", err);
@@ -1368,7 +1624,8 @@ function renderPage(){
 }
 
 function updateNav(){
-  $("#pageLbl").textContent = pageCount ? pageNo+" / "+pageCount : "— / —";
+  var part = grp ? grpMemberAt(pageNo) : null;
+  $("#pageLbl").textContent = pageCount ? pageNo+" / "+pageCount + (part ? " " + partLabel(part) : "") : "— / —";
   $("#prev").disabled = pageNo<=1;
   $("#next").disabled = pageNo>=pageCount;
 }
@@ -1917,7 +2174,7 @@ inkCv.addEventListener("pointerleave", endStroke);
 /* ---------- 現品写真 ---------- */
 /* チェック完了のときだけ、撮った写真をPDFの末尾に足す。
    上書き保存や別名保存には入れない(元の枚数を勝手に増やさないため)。 */
-var photos=[];
+var photos=[], photoPages=[];   // photoPages: 撮ったときのページ(まとめて開いたときの振り分けに使う)
 
 function updatePhotoBtn(){
   var b=$("#photo");
@@ -1925,7 +2182,7 @@ function updatePhotoBtn(){
   b.classList.toggle("has", photos.length>0);
 }
 
-function clearPhotos(){ photos=[]; updatePhotoBtn(); }
+function clearPhotos(){ photos=[]; photoPages=[]; updatePhotoBtn(); }
 
 $("#photo").onclick = function(){
   if(!photos.length){ $("#photoInput").click(); return; }
@@ -1945,7 +2202,7 @@ $("#photoInput").addEventListener("change", function(e){
   var chain=Promise.resolve();
   files.forEach(function(f){
     chain = chain.then(function(){ return photoToJpeg(f); })
-                 .then(function(bytes){ photos.push(bytes); });
+                 .then(function(bytes){ photos.push(bytes); photoPages.push(pageNo); });
   });
   chain.then(function(){
     updatePhotoBtn();
@@ -1985,14 +2242,14 @@ function photoToJpeg(file){
 }
 
 /* 写真を1枚1ページとして末尾に足す。用紙は本体の1ページ目に合わせる */
-function appendPhotos(out){
-  if(!photos.length) return Promise.resolve();
+function appendPhotos(out, list){
+  if(!list || !list.length) return Promise.resolve();
 
   var first=out.getPages()[0];
   var pw=first?first.getWidth():595.28, ph=first?first.getHeight():841.89;
   var chain=Promise.resolve();
 
-  photos.forEach(function(bytes){
+  list.forEach(function(bytes){
     chain=chain.then(function(){ return out.embedJpg(bytes); }).then(function(img){
       var page=out.addPage([pw, ph]);
       var m=Math.min(pw, ph)*0.05;
@@ -2015,6 +2272,7 @@ function bytesToB64(bytes){
 
 function save(mode){
   if(!curFile) return;
+  if(grp){ saveGroup(mode); return; }
   var btns=[$("#saveOver"), $("#saveCopy"), $("#saveDone")];
   var label = mode==="overwrite" ? $("#saveOver") : (mode==="done" ? $("#saveDone") : $("#saveCopy"));
   var old = label.textContent;
@@ -2067,7 +2325,7 @@ function save(mode){
 
 /* チェック完了で元ファイルが消えるため、開いている状態も閉じる */
 function closeFile(){
-  curFile=null; pdfDoc=null; srcBytes=null;
+  curFile=null; grp=null; pdfDoc=null; srcBytes=null;
   marks={}; pageNo=1; pageCount=0; zoom=1; setDirty(false);
   sheet.hidden=true; hint.hidden=false;
   ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl","photo","closeBtn"].forEach(function(id){
@@ -2076,14 +2334,19 @@ function closeFile(){
 }
 
 function buildPdf(withPhotos){
+  return buildPdfFrom(srcBytes, marks, withPhotos ? photos : null);
+}
+
+/* 書き込む前のPDF bytes に書き込み mk(ページ番号→一覧)を焼き込み、写真 photoList を末尾に足す */
+function buildPdfFrom(bytes, mk, photoList){
   var PDFDocument = PDFLib.PDFDocument;
   // ハンコの字がフォント未読込のまま焼き込まれないように待つ
   var fontReady = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
   return fontReady.then(function(){
-    return PDFDocument.load(srcBytes.slice());
+    return PDFDocument.load(bytes.slice());
   }).then(function(out){
     var pages=out.getPages();
-    var keys=Object.keys(marks).filter(function(k){ return (marks[k]||[]).length; });
+    var keys=Object.keys(mk).filter(function(k){ return (mk[k]||[]).length; });
 
     var chain=Promise.resolve();
     keys.forEach(function(key){
@@ -2095,7 +2358,7 @@ function buildPdf(withPhotos){
         off.width=Math.round(sz.width*S);
         off.height=Math.round(sz.height*S);
         var oc=off.getContext("2d");
-        marks[key].forEach(function(m){ paint(oc, m, off.width, off.height, S); });
+        mk[key].forEach(function(m){ paint(oc, m, off.width, off.height, S); });
 
         return new Promise(function(res){ off.toBlob(res, "image/png"); })
           .then(function(blob){ return blob.arrayBuffer(); })
@@ -2107,7 +2370,7 @@ function buildPdf(withPhotos){
     });
 
     return chain
-      .then(function(){ return withPhotos ? appendPhotos(out) : null; })
+      .then(function(){ return appendPhotos(out, photoList); })
       .then(function(){ return out.save(); });
   });
 }
