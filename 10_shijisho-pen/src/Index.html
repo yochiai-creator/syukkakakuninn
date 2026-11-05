@@ -1104,7 +1104,21 @@ function doOpenFile(f){
    ものが2枚以上あれば「まとめて開く」を出す。開くと1つにつないで見せ、
    保存するときに書き込みをそれぞれの指図書に分けて戻す(サーバーには1枚ずつ送る)。
    現品の写真は、撮ったときに開いていた指図書に付ける。
-   訂正版(前の版をまだつないでいないもの)と作業指示一覧表、別名で保存したものは入れない。 */
+   訂正版(前の版をまだつないでいないもの)と作業指示一覧表、別名で保存したものは入れない。
+
+   並びは、表紙を全部 → 対比表を全部 → 別紙を全部(対比表を続けてチェックできるように)。
+   指図書1枚の中は 表紙(1ページ目)・対比表・別紙 の順。対比表は1ページに50本
+   (25行×2列)なので、本数から対比表のページ数が分かる。本数が読めていなければ
+   2ページ目から後ろを全部対比表とみなす(元の順のまま)。 */
+var TABLE_ROWS_PER_PAGE=50;
+function pageSections(m){
+  var t = m.qty>0 ? Math.min(Math.ceil(m.qty/TABLE_ROWS_PER_PAGE), m.pages-1) : m.pages-1;
+  var cover=[], table=[], extra=[];
+  for(var n=1;n<=m.pages;n++){
+    if(n===1) cover.push(n); else if(n<=1+t) table.push(n); else extra.push(n);
+  }
+  return [cover, table, extra];
+}
 function orderBase(p){
   if(!p || p.list || p.sub) return "";
   return String(p.no).replace(/\(\d+\)$/, "");
@@ -1155,13 +1169,11 @@ function groupRow(g){
 function isGrpMember(id){
   return !!grp && grp.some(function(m){ return m.id===id; });
 }
+var grpPages=[];   // 通しのページ → {m, local}(まとめて開いたとき)
 function grpMemberAt(page){
   if(!grp) return null;
-  for(var i=0;i<grp.length;i++){
-    var m=grp[i];
-    if(page>=m.start && page<m.start+m.pages) return m;
-  }
-  return null;
+  var g=grpPages[page-1];
+  return g ? g.m : null;
 }
 
 function openGroup(files){
@@ -1182,7 +1194,7 @@ function loadOne(id){
 function prepMember(res, f){
   var p=parseSortName(f.name);
   var m={id:res.id, name:res.name, no:p ? p.no : res.name, part:orderPart(p) || 1,
-         bytes:b64ToBytes(res.data), marks:{}, baseSource:"file"};
+         qty:Number(f.qty)||0, bytes:b64ToBytes(res.data), marks:{}, baseSource:"file"};
   return pdfjsLib.getDocument({data: m.bytes.slice()}).promise.then(function(doc){
     if(res.marks && (!res.pages || res.pages===doc.numPages)){
       m.marks=res.marks; m.baseSource="shelf"; m.pages=doc.numPages;
@@ -1213,25 +1225,33 @@ function doOpenGroup(files){
     return Promise.all(list.map(function(res, i){ return prepMember(res, files[i]); }));
   }).then(function(members){
     if(!members) return;
-    // 1つにつなぐ。書き込みのページ番号も通し番号に直す
-    var D=PDFLib.PDFDocument, all={}, start=1;
-    members.forEach(function(m){
-      m.start=start;
-      Object.keys(m.marks||{}).forEach(function(k){
-        var n=parseInt(k,10);
-        if(n>=1 && n<=m.pages && (m.marks[k]||[]).length) all[String(start+n-1)]=m.marks[k];
+    // 1つにつなぐ。表紙→対比表→別紙の順。書き込みのページ番号も通し番号に直す
+    var D=PDFLib.PDFDocument, all={}, order=[];
+    var secs=members.map(pageSections);
+    [0,1,2].forEach(function(s){
+      members.forEach(function(m, i){
+        secs[i][s].forEach(function(local){ order.push({m:m, local:local}); });
       });
-      start+=m.pages;
+    });
+    members.forEach(function(m){ m.at={}; });
+    order.forEach(function(g, k){
+      g.m.at[g.local]=k+1;
+      var list=(g.m.marks||{})[String(g.local)];
+      if(list && list.length) all[String(k+1)]=list;
     });
     return D.create().then(function(out){
-      var chain=Promise.resolve();
-      members.forEach(function(m){
+      var copied=[], chain=Promise.resolve();
+      members.forEach(function(m, i){
         chain=chain.then(function(){ return D.load(m.bytes.slice()); })
           .then(function(src){ return out.copyPages(src, src.getPageIndices()); })
-          .then(function(pages){ pages.forEach(function(pg){ out.addPage(pg); }); });
+          .then(function(pages){ copied[i]=pages; });
       });
-      return chain.then(function(){ return out.save(); });
+      return chain.then(function(){
+        order.forEach(function(g){ out.addPage(copied[members.indexOf(g.m)][g.local-1]); });
+        return out.save();
+      });
     }).then(function(bytes){
+      grpPages=order;
       curFile={id:members[0].id, name:members[0].no.replace(/\(\d+\)$/, "") + " " + members.map(partLabel).join("")};
       grp=members;
       carryPending=false;
@@ -1267,7 +1287,7 @@ function saveGroup(mode){
   var one=function(m){
     var mk={}, has=false;
     for(var n=1;n<=m.pages;n++){
-      var list=marks[String(m.start+n-1)];
+      var list=marks[String(m.at[n])];
       if(list && list.length){ mk[String(n)]=list; has=true; }
     }
     // 一度も保存していない、書き込みも無い指図書は、上書きしても何も変わらない
