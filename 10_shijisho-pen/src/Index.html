@@ -588,7 +588,7 @@ $("#saveDone").onclick = function(){
     : "現品の写真はまだありません。\n\n";
 
   if(grp) photoLine = photos.length
-    ? "現品の写真 " + photos.length + " 枚を、撮ったときに開いていた指図書の末尾に追加します。\n\n"
+    ? "現品の写真を、撮ったときに開いていた指図書の末尾に追加します。\n" + photoSplit() + "\n\n"
     : photoLine;
   ask(photoLine + "チェック完了として ◆チェック完了 に保存します。\n\n保存後、元の "
     + (grp ? grp.map(partLabel).join("") + " の " + grp.length + " 枚" : curFile.name)
@@ -2202,11 +2202,20 @@ function updatePhotoBtn(){
   b.classList.toggle("has", photos.length>0);
 }
 
+/* まとめて開いているとき、写真がどの指図書に付くか: (1) 1枚・(3) 2枚 */
+function photoSplit(){
+  if(!grp) return "";
+  return grp.map(function(m){
+    var n=photoPages.filter(function(pg){ return grpMemberAt(pg)===m; }).length;
+    return n ? partLabel(m) + " " + n + "枚" : "";
+  }).filter(Boolean).join("・") || "なし";
+}
+
 function clearPhotos(){ photos=[]; photoPages=[]; updatePhotoBtn(); }
 
 $("#photo").onclick = function(){
   if(!photos.length){ $("#photoInput").click(); return; }
-  ask("現品の写真が "+photos.length+" 枚あります。",
+  ask("現品の写真が "+photos.length+" 枚あります。" + (grp ? "\n" + photoSplit() : ""),
       function(){ $("#photoInput").click(); },
       { yes:"追加する", extra:{ label:"全部消す", fn:function(){
           clearPhotos(); toast("写真を消しました");
@@ -2226,7 +2235,8 @@ $("#photoInput").addEventListener("change", function(e){
   });
   chain.then(function(){
     updatePhotoBtn();
-    toast("写真 "+photos.length+" 枚");
+    toast(grp ? "写真は " + partLabel(grpMemberAt(pageNo)) + " に付けます(" + photoSplit() + ")"
+              : "写真 "+photos.length+" 枚");
   }).catch(function(err){
     console.error(err);
     toast("写真を読み込めませんでした");
