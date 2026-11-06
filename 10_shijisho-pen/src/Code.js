@@ -735,7 +735,9 @@ function putShelfMarks_(targetId, marksJson, md5, existing) {
 /** チェック完了したファイルの棚の2つをゴミ箱へ */
 function trashShelf_(fileId, meta) {
   try {
-    if (meta && !isSaved_(meta)) return;     // 一度も保存していなければ棚は無い
+    // 一度も保存していなければ棚は無い(チェック完了した一覧表は、目印は無いが棚の ID がある)
+    var pr = (meta && meta.properties) || {};
+    if (meta && !isSaved_(meta) && !pr[SHELF_BASE_PROP]) return;
     var got = shelfFiles_(fileId, meta);
     [got.base, got.marks].forEach(function (f) {
       if (f) Drive.Files.update({ trashed: true }, f.id, null, { supportsAllDrives: true });

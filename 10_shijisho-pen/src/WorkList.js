@@ -51,6 +51,7 @@ function copyWorkLists_() {
   try { copied = JSON.parse(props.getProperty(PROP_WL_COPIED) || '[]'); } catch (e) {}
 
   var dest = cachedChildFolder_(SORT_DEST_ROOT_ID, WORK_LIST_FOLDER);
+  clearDoneListSaved_(dest);
   var made = [];
   // 手でコピーしたものも二重にしないよう、中身(md5)が同じものがあればコピー済みとみなす
   var inDest = {};
@@ -275,7 +276,8 @@ function trashWorkList_(id) {
  */
 function afterWorkListDone_(done, original, base, marksJson) {
   if (base && marksJson) {
-    var props = savedProps_();
+    // 棚の ID だけ付ける。途中保存の目印は付けない(付けると途中保存の一覧に残ってしまう)
+    var props = {};
     props[SHELF_BASE_PROP] = shelfPut_(shelfNames_(done.id).base, base, null);
     props[SHELF_MARKS_PROP] = putShelfMarks_(done.id, marksJson, done.md5, null);
     Drive.Files.update({ properties: props }, done.id, null, { supportsAllDrives: true });
@@ -293,6 +295,39 @@ function afterWorkListDone_(done, original, base, marksJson) {
       Drive.Files.update({ name: want }, done.id, null, { supportsAllDrives: true });
       done.name = want;
     }
+  }
+}
+
+/**
+ * チェック完了した一覧表に、以前は途中保存の目印まで付けていた(2026/11 まで)。
+ * そのせいで途中保存の一覧に残るので、目印だけ外す(棚の ID は残す)。
+ * 途中保存の一覧表のうち、容器種類別/作業指示一覧表 以外にあり、親が「作業指示一覧表」で
+ * その上が「◯月」のフォルダ(◆チェック完了/年/月/作業指示一覧表)にあるものが対象。
+ */
+function clearDoneListSaved_(dest) {
+  try {
+    var res = Drive.Files.list(withSavedScope_({
+      q: savedQuery_() + " and name contains '" + WORK_LIST_FOLDER + "'",
+      fields: 'files(id,name,parents)', pageSize: 100,
+      supportsAllDrives: true, includeItemsFromAllDrives: true
+    }));
+    var n = 0;
+    (res.files || []).forEach(function (f) {
+      var pid = (f.parents || [])[0];
+      if (!pid || pid === dest || !isWorkListName_(f.name)) return;
+      var parent = folderMeta_(pid);
+      if (parent.name !== WORK_LIST_FOLDER) return;
+      var month = parent.parents && parent.parents[0] && folderMeta_(parent.parents[0]);
+      if (!month || !/^\d{1,2}月$/.test(month.name)) return;
+      var off = {}; off[SAVED_PROP] = null; off[SAVED_AT_PROP] = null;
+      Drive.Files.update({ properties: off }, f.id, null, { supportsAllDrives: true });
+      n++;
+    });
+    if (n) console.log('チェック完了した一覧表の途中保存の目印を外した: ' + n);
+    return n;
+  } catch (e) {
+    console.warn('一覧表の途中保存の目印を外せませんでした: ' + e.message);
+    return 0;
   }
 }
 
