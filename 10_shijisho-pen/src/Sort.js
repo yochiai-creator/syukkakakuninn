@@ -31,6 +31,10 @@ var SRC_ROOT_ID = '13qWXWwBXgbEO9avO5qlnZ0WHDaMSaYA_';
 // 先: ◆容器種類別
 var SORT_DEST_ROOT_ID = '1qCpeKIO3gvPWkVDqXApVREDEiWKU_3D6';
 
+// ◆容器種類別/現地修正。現地で直す指図書のコピーを、容器サイズのフォルダから手で移して置く。
+// 振り分けはこの中を片付けない。コピー済みかどうかを見るときだけ名前を読む(移したものを二重にコピーしない)
+var GENBA_FOLDER = '現地修正';
+
 // 実行時間の上限(GASの6分制限に対する余裕)。
 // 1件あたりの所要時間ぶんは残しておくこと。
 var SORT_TIME_BUDGET_MS = 5 * 60 * 1000;
@@ -416,7 +420,7 @@ function runMonth_(yearName, monthName, max) {
   // 振り分けるのは出荷日が明日以降のものだけなので、チェック完了も出荷日が
   // 今月以降の月フォルダだけ見れば足りる(先月以前は読まない)
   var doneNames = collectDestNames_(sizeFolders).concat(collectCheckedNames_(true))
-    .concat(supersededPrefixes_());
+    .concat(collectGenbaNames_()).concat(supersededPrefixes_());
 
   var result = { コピー: [], 済み: 0, 対象外: 0, skip: [], 未登録: [], 残り: 0, 訂正版: [] };
   var files = DriveApp.getFolderById(src).getFilesByType(MimeType.PDF);
@@ -1433,6 +1437,15 @@ function collectDestNames_(sizeFolders) {
     var it = DriveApp.getFolderById(sizeFolders[kg].id).getFiles();
     while (it.hasNext()) names.push(it.next().getName());
   });
+  return names;
+}
+
+/** ◆容器種類別/現地修正 にあるファイル名。フォルダが無ければ空 */
+function collectGenbaNames_() {
+  var id = findChildFolder_(SORT_DEST_ROOT_ID, GENBA_FOLDER);
+  if (!id) return [];
+  var names = [], it = DriveApp.getFolderById(id).getFiles();
+  while (it.hasNext()) names.push(it.next().getName());
   return names;
 }
 
