@@ -211,6 +211,18 @@
           max-width:min(460px, 100%); box-shadow:0 12px 40px rgba(0,0,0,.3);}
   #askMsg{margin:0 0 18px; font-size:15px; line-height:1.7; white-space:pre-line;}
   .askRow{display:flex; gap:8px; justify-content:flex-end;}
+  .askBox.wide{max-width:min(640px, 100%);}
+  /* チェック完了のときの作業量(マーク板DBの作業実績に使う) */
+  #askForm{margin:0 0 16px;}
+  #askForm .wkHead{font-size:13px; font-weight:600; color:#3a3d44; margin-bottom:6px;}
+  #askForm table{border-collapse:collapse; width:100%;}
+  #askForm th{font-size:12px; font-weight:600; color:#5c5f66; text-align:left; padding:0 4px 4px;}
+  #askForm td{padding:3px 4px;}
+  #askForm td.lb{font-size:14px; font-weight:600; white-space:nowrap; color:#0b4f6c;}
+  #askForm input{width:100%; min-width:0; box-sizing:border-box; font-size:16px; padding:6px 6px;
+                 border:1px solid var(--line); border-radius:8px; background:#fff;}
+  #askForm input.n{max-width:64px; text-align:right; font-variant-numeric:tabular-nums;}
+  #askForm .wkNote{font-size:12px; color:#6b6e75; margin-top:6px;}
   .askRow button{min-width:88px;}
 
   #toast{
@@ -319,6 +331,7 @@
 <div id="ask" hidden>
   <div class="askBox">
     <p id="askMsg"></p>
+    <div id="askForm" hidden></div>
     <div class="askRow">
       <button id="askNo">やめる</button>
       <button id="askExtra" hidden></button>
@@ -475,6 +488,8 @@ function ask(msg, onYes, opts){
     askExtraFn = null;
   }
 
+  $("#askForm").hidden = !opts.form;
+  $(".askBox").classList.toggle("wide", !!opts.form);
   $("#ask").hidden = false;
   askFn = onYes;
 }
@@ -543,14 +558,78 @@ $("#saveDone").onclick = function(){
   if(grp) photoLine = photos.length
     ? "現品の写真を、撮ったときに開いていた指図書の末尾に追加します。\n" + photoSplit() + "\n\n"
     : photoLine;
+  // 作業量の欄(一覧表には出さない)。まとめて開いたときは指図書ごとに1行
+  var wlName=parseSortName(curFile.name), isList=!!(wlName && wlName.list);
+  var targets = isList ? [] : (grp ? grp.map(function(m){ return {id:m.id, label:partLabel(m)}; })
+                                   : [{id:curFile.id, label:""}]);
+  buildWorkForm(targets);
+  var opts = photos.length ? {} : { yes:"写真なしで保存", extra:{ label:"写真を撮る", fn:function(){
+        $("#photoInput").click();
+    }}};
+  opts.form = targets.length > 0;
   ask(photoLine + "チェック完了として ◆チェック完了 に保存します。\n\n保存後、元の "
     + (grp ? grp.map(partLabel).join("") + " の " + grp.length + " 枚" : curFile.name)
     + " はゴミ箱へ移動します。\n(30日間は Drive のゴミ箱から戻せます)",
-    function(){ save("done"); },
-    photos.length ? null : { yes:"写真なしで保存", extra:{ label:"写真を撮る", fn:function(){
-        $("#photoInput").click();
-    }}});
+    function(){ doneWork = readWorkForm(); save("done"); }, opts);
 };
+
+/* ---------- チェック完了のときの作業量 ----------
+   タッチアップ・ネジ山修正・P塗り・オフライン対応は本数(点数)、追加作業は文字。
+   完了したファイルの説明欄に「タッチアップ:9」のように残し、マーク板DBの作業実績で使う。
+   空欄は 0 として送る(入力した・しないの区別より、行がそろっている方が集計しやすい)。
+   追加作業だけは書いたときだけ送る。 */
+var WORK_FIELDS = [
+  {k:"タッチアップ", l:"タッチアップ", n:true},
+  {k:"ネジ山修正",   l:"ネジ山修正",   n:true},
+  {k:"P塗り",        l:"P塗り",        n:true},
+  {k:"オフライン対応", l:"オフライン",  n:true},
+  {k:"追加作業",     l:"追加作業",     n:false}
+];
+var doneWork = {};   // ファイルID → {タッチアップ:"9", …}
+
+function buildWorkForm(targets){
+  var box=$("#askForm"); box.innerHTML="";
+  if(!targets.length) return;
+  var h=document.createElement("div"); h.className="wkHead"; h.textContent="作業量(本数)";
+  box.appendChild(h);
+  var tb=document.createElement("table"), tr=document.createElement("tr");
+  if(targets.length>1 || targets[0].label) tr.appendChild(document.createElement("th"));
+  WORK_FIELDS.forEach(function(f){ var th=document.createElement("th"); th.textContent=f.l; tr.appendChild(th); });
+  tb.appendChild(tr);
+  targets.forEach(function(t){
+    var r=document.createElement("tr");
+    if(targets.length>1 || t.label){ var lb=document.createElement("td"); lb.className="lb"; lb.textContent=t.label; r.appendChild(lb); }
+    WORK_FIELDS.forEach(function(f){
+      var td=document.createElement("td"), inp=document.createElement("input");
+      inp.dataset.id=t.id; inp.dataset.k=f.k;
+      if(f.n){ inp.className="n"; inp.type="text"; inp.inputMode="numeric"; inp.placeholder="0"; inp.maxLength=4; }
+      else { inp.type="text"; inp.placeholder="あれば"; inp.maxLength=60; }
+      td.appendChild(inp); r.appendChild(td);
+    });
+    tb.appendChild(r);
+  });
+  box.appendChild(tb);
+  var nt=document.createElement("div"); nt.className="wkNote"; nt.textContent="無ければ空欄のまま(0 になります)";
+  box.appendChild(nt);
+}
+
+/* 欄の値を読む: ファイルID → {キー: 値}。数は半角の整数に直す */
+function readWorkForm(){
+  var out={};
+  document.querySelectorAll("#askForm input").forEach(function(inp){
+    var id=inp.dataset.id, k=inp.dataset.k, f=WORK_FIELDS.filter(function(x){ return x.k===k; })[0];
+    var v=String(inp.value||"").trim();
+    if(f.n){
+      v=v.replace(/[０-９]/g, function(c){ return String.fromCharCode(c.charCodeAt(0)-0xFEE0); }).replace(/[^\d]/g,"");
+      v=String(Number(v||0));
+    } else {
+      v=v.replace(/[\r\n]+/g," ");
+      if(!v) return;
+    }
+    (out[id]=out[id]||{})[k]=v;
+  });
+  return out;
+}
 
 function setDirty(v){
   dirty=v;
@@ -1144,6 +1223,7 @@ function saveGroup(mode){
     photos.forEach(function(b, k){ if(grpMemberAt(photoPages[k]||1)===m) ph.push(b); });
     return buildPdfFrom(m.bytes, mk, mode==="done" ? ph : null).then(function(bytes){
       var req={fileId:m.id, data:bytesToB64(bytes), mode:mode};
+      if(mode==="done" && doneWork[m.id]) req.work=doneWork[m.id];
       if(mode!=="done"){
         req.marks=JSON.stringify({pages:m.pages, marks:mk});
         req.baseSource=m.baseSource;
@@ -2162,6 +2242,7 @@ function save(mode){
     // 一覧表はチェック完了でも書き込みを送る(訂正版に写せるよう、完了したものにも残す)
     var wl=parseSortName(curFile.name); wl=!!(wl && wl.list);
     if(carryPending) req.carry=true;
+    if(mode==="done" && doneWork[curFile.id]) req.work=doneWork[curFile.id];
     if(mode!=="done" || wl){
       req.marks = JSON.stringify({pages: pageCount, marks: packMarks()});
       req.baseSource = baseSource;

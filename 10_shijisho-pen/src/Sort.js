@@ -729,8 +729,13 @@ var INFO_CODE = '得意先コード', INFO_QTY = '数量', INFO_RANGE = '容器N
 // アプリで前の版のページをつないだら 結合:済
 var INFO_PREV = '前の版', INFO_PREV_DATE = '前の版の出荷日', INFO_PREV_STATE = '前の版の状態',
     INFO_MERGED = '結合';
+// チェック完了のとき、アプリで入れる作業量と完了日時(マーク板DBの作業実績で読む)。Code.js withWorkInfo_
+var INFO_EXTRA_WORK = '追加作業', INFO_DONE_AT = 'チェック完了日時';
+var WORK_INFO_KEYS = ['タッチアップ', 'ネジ山修正', 'P塗り', 'オフライン対応', INFO_EXTRA_WORK];
+// 説明欄を書き直すとき残す項目。ここに無い項目は消える(先頭が _ の印は別に残す)
 var INFO_KEYS = [INFO_CODE, INFO_QTY, INFO_RANGE, INFO_TIME, INFO_ITEM, INFO_SIZE, INFO_DEST,
-                 INFO_PREV, INFO_PREV_DATE, INFO_PREV_STATE, INFO_MERGED];
+                 INFO_PREV, INFO_PREV_DATE, INFO_PREV_STATE, INFO_MERGED]
+  .concat(WORK_INFO_KEYS).concat([INFO_DONE_AT]);
 
 function readInfo_(desc) {
   var out = {};

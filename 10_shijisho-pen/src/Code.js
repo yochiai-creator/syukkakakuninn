@@ -815,6 +815,8 @@ function savePdf(req) {
     // 一覧表は、完了したあとも訂正版へチェックを写せるよう、書き込む前のPDFを先に取っておく
     var wl = isWorkListName_(original.name);
     var wlBase = wl && req.marks ? baseBlob_(req) : null;
+    // 作業量(タッチアップなど)と完了日時を説明欄に足して、完了したファイルへ引き継ぐ
+    if (!wl) original.description = withWorkInfo_(original.description, req.work);
     var done = saveDone_(req.fileId, original, blob);
     trashShelf_(req.fileId, original);
     if (wl) afterWorkListDone_(done, original, wlBase, req.marks);
@@ -861,6 +863,29 @@ function savePdf(req) {
  * それが確実に出来てから元ファイルをゴミ箱へ移す。
  * コピーに失敗した場合、元ファイルには一切触れない。
  */
+/**
+ * チェック完了で、説明欄に作業量と完了日時を足す(マーク板DBの作業実績で読む)。
+ *   タッチアップ:9 / ネジ山修正:0 / P塗り:0 / オフライン対応:0 / 追加作業:… / チェック完了日時:2026-11-14 10:23
+ * 同じ名前の行が前からあれば置き換える。数でない値・改行は入れない。
+ */
+function withWorkInfo_(desc, work) {
+  var keys = WORK_INFO_KEYS.concat([INFO_DONE_AT]);
+  var lines = String(desc || '').split(/\r?\n/).filter(function (line) {
+    var i = line.indexOf(':');
+    return line && !(i > 0 && keys.indexOf(line.slice(0, i).trim()) >= 0);
+  });
+  work = work || {};
+  WORK_INFO_KEYS.forEach(function (k) {
+    var v = String(work[k] == null ? '' : work[k]).replace(/[\r\n]+/g, ' ').trim();
+    if (k === INFO_EXTRA_WORK) { if (v) lines.push(k + ':' + v.slice(0, 60)); return; }
+    v = v.replace(/[^\d]/g, '');
+    lines.push(k + ':' + String(Number(v || 0)));
+  });
+  var tz = Session.getScriptTimeZone() || 'Asia/Tokyo';
+  lines.push(INFO_DONE_AT + ':' + Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm'));
+  return lines.join('\n');
+}
+
 function saveDone_(fileId, original, blob) {
   // 月は出荷日の月(ファイル名の 26.10.01_ から)。名前から読めなければ今月
   var ym = doneMonthOf_(original.name);
