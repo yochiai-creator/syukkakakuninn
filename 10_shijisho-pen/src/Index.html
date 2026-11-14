@@ -264,7 +264,7 @@
 
   <div id="barSave">
     <span id="dirty">未保存</span>
-    <button id="workBtn" disabled title="タッチアップなど、やったときだけ入れる">作業量</button>
+    <button id="workBtn" disabled title="タッチアップなど、やったときだけ入れる">特別作業</button>
     <button id="photo" disabled>写真</button>
     <input id="photoInput" type="file" accept="image/*" multiple hidden>
     <button id="saveCopy" disabled>別名</button>
@@ -352,7 +352,7 @@
 
 <div id="work" hidden>
   <div class="askBox">
-    <h3>作業量を入れてください</h3>
+    <h3>特別作業を入れてください</h3>
     <p class="workNote">指図書から分からない作業だけです。やっていなければ 0 のまま「次へ」。</p>
     <div id="workRows"></div>
     <div class="askRow">
@@ -665,7 +665,7 @@ function workParts(w){
 /* 表紙に出す作業量の文。何も無ければ "" */
 function workLabel(w){
   var s=workParts(w);
-  return s.length ? "作業量  " + s.join("・") : "";
+  return s.length ? "特別作業  " + s.join("・") : "";
 }
 
 /* いま見ているページが表紙なら、その指図書の作業量の文 */
@@ -698,11 +698,11 @@ function paintWorkLabel(ctx, text, W, H){
 /* 作業量ボタン: 一覧表では使えない。入れてあれば色を付ける */
 function updateWorkBtn(){
   var b=$("#workBtn"), t=curFile ? workTargets() : [];
-  if(!curFile || !t.length){ b.disabled=true; b.classList.remove("has"); b.textContent="作業量"; return; }
+  if(!curFile || !t.length){ b.disabled=true; b.classList.remove("has"); b.textContent="特別作業"; return; }
   b.disabled=false;
   var n=t.filter(function(x){ return workParts(workInput[x.id]).length; }).length;
   b.classList.toggle("has", n>0);
-  b.textContent = n ? "作業量 ✓" : "作業量";
+  b.textContent = n ? "特別作業 ✓" : "特別作業";
 }
 
 function workSummary(targets){
@@ -711,7 +711,7 @@ function workSummary(targets){
     var s=workParts(workInput[t.id]); if(!s.length) return;
     parts.push((targets.length>1 ? t.label.split(" ")[0]+" " : "") + s.join("・"));
   });
-  return parts.length ? "作業量: " + parts.join(" / ") + "\n\n" : "";
+  return parts.length ? "特別作業: " + parts.join(" / ") + "\n\n" : "";
 }
 
 /* 作業量は、やったときだけ「作業量」ボタンから入れる(チェック完了のたびには聞かない)。
@@ -724,7 +724,7 @@ $("#workBtn").onclick = function(){
     updateWorkBtn();
     if(pdfDoc) redraw();                 // 表紙の札を描き直す
     var s=workSummary(targets).trim();
-    toast(s || "作業量なし(0)にしました");
+    toast(s || "特別作業なし(0)にしました");
   });
 };
 
