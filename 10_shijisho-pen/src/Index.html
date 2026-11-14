@@ -95,7 +95,7 @@
   .sep{width:1px; height:26px; background:var(--line); flex:0 0 auto;}
   #pageLbl{font-variant-numeric:tabular-nums; padding:0 6px; font-size:14px;}
   #zoomLbl{font-variant-numeric:tabular-nums; min-width:58px;}
-  #photo.has{background:#e8f1ec; color:#0b6b5d; font-weight:600;}
+  #photo.has, #workBtn.has{background:#e8f1ec; color:#0b6b5d; font-weight:600;}
   #stamps button{color:var(--stamp); font-weight:600; padding:8px 10px;}
   #stamps button.on{background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.14);}
   #seals button{padding:4px 6px;}
@@ -264,6 +264,7 @@
 
   <div id="barSave">
     <span id="dirty">未保存</span>
+    <button id="workBtn" disabled title="タッチアップなど、やったときだけ入れる">作業量</button>
     <button id="photo" disabled>写真</button>
     <input id="photoInput" type="file" accept="image/*" multiple hidden>
     <button id="saveCopy" disabled>別名</button>
@@ -650,22 +651,49 @@ $("#workZero").onclick=function(){
 };
 
 /* 確認ダイアログに出す作業量の1行。0 のものは出さない */
+/* 入れた作業量の中身(0 のものは除く)。何も無ければ [] */
+function workParts(w){
+  if(!w) return [];
+  var s=WORK_NUM.filter(function(k){ return w[k]>0; }).map(function(k){ return k+" "+w[k]; });
+  if(w["追加作業"] || w["追加作業数"]>0) s.push((w["追加作業"]||"追加作業")+" "+(w["追加作業数"]||0));
+  return s;
+}
+
+/* 作業量ボタン: 一覧表では使えない。入れてあれば色を付ける */
+function updateWorkBtn(){
+  var b=$("#workBtn"), t=curFile ? workTargets() : [];
+  if(!curFile || !t.length){ b.disabled=true; b.classList.remove("has"); b.textContent="作業量"; return; }
+  b.disabled=false;
+  var n=t.filter(function(x){ return workParts(workInput[x.id]).length; }).length;
+  b.classList.toggle("has", n>0);
+  b.textContent = n ? "作業量 ✓" : "作業量";
+}
+
 function workSummary(targets){
   var parts=[];
   targets.forEach(function(t){
-    var w=workInput[t.id]; if(!w) return;
-    var s=WORK_NUM.filter(function(k){ return w[k]>0; }).map(function(k){ return k+" "+w[k]; });
-    if(w["追加作業"] || w["追加作業数"]>0) s.push((w["追加作業"]||"追加作業")+" "+(w["追加作業数"]||0));
-    parts.push((targets.length>1 ? t.label.split(" ")[0]+" " : "") + (s.length ? s.join("・") : "なし"));
+    var s=workParts(workInput[t.id]); if(!s.length) return;
+    parts.push((targets.length>1 ? t.label.split(" ")[0]+" " : "") + s.join("・"));
   });
   return parts.length ? "作業量: " + parts.join(" / ") + "\n\n" : "";
 }
 
-$("#saveDone").onclick = function(){
+/* 作業量は、やったときだけ「作業量」ボタンから入れる(チェック完了のたびには聞かない)。
+   入れていない指図書も、チェック完了では 0 として説明欄に書く(集計で行がそろうように) */
+$("#workBtn").onclick = function(){
   if(!curFile) return;
   var targets=workTargets();
-  if(!targets.length) return confirmDone([]);
-  openWork(targets, function(){ confirmDone(targets); });
+  if(!targets.length) return;
+  openWork(targets, function(){
+    updateWorkBtn();
+    var s=workSummary(targets).trim();
+    toast(s || "作業量なし(0)にしました");
+  });
+};
+
+$("#saveDone").onclick = function(){
+  if(!curFile) return;
+  confirmDone(workTargets());
 };
 
 function confirmDone(targets){
@@ -681,7 +709,7 @@ function confirmDone(targets){
     + " はゴミ箱へ移動します。\n(30日間は Drive のゴミ箱から戻せます)",
     function(){ save("done"); },
     photos.length ? null : { yes:"写真なしで保存", extra:{ label:"写真を撮る", fn:function(){
-        $("#photoInput").click();      // 撮ったあと、もう一度チェック完了を押すと入れた作業量が残っている
+        $("#photoInput").click();      // 入れた作業量は、開いている間は残っている
     }}});
 }
 
@@ -1277,7 +1305,7 @@ function saveGroup(mode){
     photos.forEach(function(b, k){ if(grpMemberAt(photoPages[k]||1)===m) ph.push(b); });
     return buildPdfFrom(m.bytes, mk, mode==="done" ? ph : null).then(function(bytes){
       var req={fileId:m.id, data:bytesToB64(bytes), mode:mode};
-      if(mode==="done" && workInput[m.id]) req.work=workInput[m.id];
+      if(mode==="done") req.work=workInput[m.id] || {};      // 入れていなければ全部 0
       if(mode!=="done"){
         req.marks=JSON.stringify({pages:m.pages, marks:mk});
         req.baseSource=m.baseSource;
@@ -1539,10 +1567,11 @@ function mountPdf(res, note){
 function showDoc(doc){
   pdfDoc=doc; pageCount=doc.numPages;
   hint.hidden=true; sheet.hidden=false;
-  ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl","photo","closeBtn"].forEach(function(id){
+  ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl","photo","workBtn","closeBtn"].forEach(function(id){
     $("#"+id).disabled=false;
   });
   if(grp) $("#saveCopy").disabled=true;
+  updateWorkBtn();
 }
 
 /* ---------- 書き込みを後から直せるようにする ----------
@@ -2296,7 +2325,7 @@ function save(mode){
     // 一覧表はチェック完了でも書き込みを送る(訂正版に写せるよう、完了したものにも残す)
     var wl=parseSortName(curFile.name); wl=!!(wl && wl.list);
     if(carryPending) req.carry=true;
-    if(mode==="done" && workInput[curFile.id]) req.work=workInput[curFile.id];
+    if(mode==="done" && !wl) req.work=workInput[curFile.id] || {};    // 入れていなければ全部 0
     if(mode!=="done" || wl){
       req.marks = JSON.stringify({pages: pageCount, marks: packMarks()});
       req.baseSource = baseSource;
@@ -2338,10 +2367,10 @@ function save(mode){
 
 /* チェック完了で元ファイルが消えるため、開いている状態も閉じる */
 function closeFile(){
-  curFile=null; grp=null; pdfDoc=null; srcBytes=null; workInput={};
+  curFile=null; grp=null; pdfDoc=null; srcBytes=null; workInput={}; updateWorkBtn();
   marks={}; pageNo=1; pageCount=0; zoom=1; setDirty(false);
   sheet.hidden=true; hint.hidden=false;
-  ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl","photo","closeBtn"].forEach(function(id){
+  ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl","photo","workBtn","closeBtn"].forEach(function(id){
     $("#"+id).disabled=true;
   });
 }
