@@ -759,6 +759,7 @@ function trashShelf_(fileId, meta) {
  *   req.marks    書き込みの一覧(JSON 文字列)。上書き・別名のとき
  *   req.baseSource  書き込む前のPDFのありか 'file' | 'shelf' | 'embedded'
  *   req.base     書き込む前のPDF(base64)。embedded のときだけ
+ *   req.work     チェック完了のときに入れた作業量(指図書だけ)。説明欄に足す(withWork_)
  * @return {Object} 保存結果
  */
 function savePdf(req) {
@@ -815,6 +816,9 @@ function savePdf(req) {
     // 一覧表は、完了したあとも訂正版へチェックを写せるよう、書き込む前のPDFを先に取っておく
     var wl = isWorkListName_(original.name);
     var wlBase = wl && req.marks ? baseBlob_(req) : null;
+    // 指図書は、現場で入れた作業量を説明欄に足してから完了フォルダへ作る
+    // (saveDone_ が original.description をそのまま引き継ぐ)
+    if (!wl && req.work) original.description = withWork_(original.description, req.work);
     var done = saveDone_(req.fileId, original, blob);
     trashShelf_(req.fileId, original);
     if (wl) afterWorkListDone_(done, original, wlBase, req.marks);
@@ -906,6 +910,45 @@ function saveDone_(fileId, original, blob) {
     folder: year + '/' + month + '/' + size,
     trashed: original.name
   };
+}
+
+/**
+ * チェック完了のときに現場で入れた作業量を、説明欄に足す(→ ARCHITECTURE 4.2 / 7.21)。
+ *   タッチアップ:9
+ *   ネジ山修正:0
+ *   P塗り:0
+ *   オフライン対応:0
+ *   追加作業:キャップ交換      ← 入れたときだけ
+ *   追加作業数:3              ← 入れたときだけ
+ *   チェック完了日時:2026/11/14 11:40
+ * 作業内容一覧の「指図書から分からない列」の元データ。マーク板DBの集計が読む。
+ * ほかの行(得意先コード・数量・前の版 など)はそのまま残し、作業量の行だけ入れ替える。
+ * @param {string} desc  今の説明欄
+ * @param {Object} work  画面から来た {タッチアップ: 9, ..., 追加作業: '', 追加作業数: 0}
+ */
+function withWork_(desc, work) {
+  work = work || {};
+  var keep = String(desc || '').split(/\r?\n/).filter(function (line) {
+    if (!line.trim()) return false;
+    var i = line.indexOf(':');
+    return i <= 0 || INFO_WORK_KEYS.indexOf(line.slice(0, i).trim()) < 0;
+  });
+  var count = function (v) {
+    var n = Math.floor(Number(v));
+    return isFinite(n) && n > 0 ? Math.min(n, 99999) : 0;
+  };
+  var lines = INFO_WORK_NUM_KEYS.map(function (k) { return k + ':' + count(work[k]); });
+
+  // 追加作業の内容は1行にする(改行・コロンは説明欄の区切りなので外す)
+  var extra = String(work[INFO_EXTRA] || '').replace(/[\r\n:：]+/g, ' ').trim().slice(0, 60);
+  var extraQty = count(work[INFO_EXTRA_QTY]);
+  if (extra || extraQty) {
+    lines.push(INFO_EXTRA + ':' + (extra || '内容なし'));
+    lines.push(INFO_EXTRA_QTY + ':' + extraQty);
+  }
+  lines.push(INFO_DONE_AT + ':' +
+             Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Tokyo', 'yyyy/MM/dd HH:mm'));
+  return keep.concat(lines).join('\n');
 }
 
 /**

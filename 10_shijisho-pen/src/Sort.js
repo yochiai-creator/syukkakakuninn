@@ -729,8 +729,16 @@ var INFO_CODE = '得意先コード', INFO_QTY = '数量', INFO_RANGE = '容器N
 // アプリで前の版のページをつないだら 結合:済
 var INFO_PREV = '前の版', INFO_PREV_DATE = '前の版の出荷日', INFO_PREV_STATE = '前の版の状態',
     INFO_MERGED = '結合';
+// チェック完了のときに現場で入れる作業量(作業内容一覧のうち、指図書から分からない列)。
+// 書くのは Code.js の withWork_。ここに並べておかないと、振り分けがチェック完了の
+// 説明欄を書き直したとき(容器サイズ・得意先コードの読み足し)に消えてしまう。
+var INFO_TOUCHUP = 'タッチアップ', INFO_NEJI = 'ネジ山修正', INFO_PNURI = 'P塗り',
+    INFO_OFFLINE = 'オフライン対応', INFO_EXTRA = '追加作業', INFO_EXTRA_QTY = '追加作業数',
+    INFO_DONE_AT = 'チェック完了日時';
+var INFO_WORK_NUM_KEYS = [INFO_TOUCHUP, INFO_NEJI, INFO_PNURI, INFO_OFFLINE];
+var INFO_WORK_KEYS = INFO_WORK_NUM_KEYS.concat([INFO_EXTRA, INFO_EXTRA_QTY, INFO_DONE_AT]);
 var INFO_KEYS = [INFO_CODE, INFO_QTY, INFO_RANGE, INFO_TIME, INFO_ITEM, INFO_SIZE, INFO_DEST,
-                 INFO_PREV, INFO_PREV_DATE, INFO_PREV_STATE, INFO_MERGED];
+                 INFO_PREV, INFO_PREV_DATE, INFO_PREV_STATE, INFO_MERGED].concat(INFO_WORK_KEYS);
 
 function readInfo_(desc) {
   var out = {};

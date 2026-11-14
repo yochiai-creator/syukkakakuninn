@@ -213,6 +213,28 @@
   .askRow{display:flex; gap:8px; justify-content:flex-end;}
   .askRow button{min-width:88px;}
 
+  /* チェック完了の前に入れる作業量。タブレットで指で押しやすいよう、
+     数は ± ボタンでも直接入力でも入れられる。 */
+  #work{position:fixed; inset:0; z-index:41; display:grid; place-items:center;
+        background:rgba(20,22,26,.45); padding:16px;}
+  #work[hidden]{display:none;}
+  #work .askBox{width:min(520px, 100%); max-height:calc(100vh - 32px); overflow:auto;}
+  #work h3{margin:0 0 4px; font-size:17px;}
+  .workNote{margin:0 0 12px; font-size:13px; color:#5b5f66; line-height:1.6;}
+  .workSec{border-top:1px solid var(--line); padding:10px 0 4px;}
+  .workSec:first-child{border-top:0; padding-top:0;}
+  .workHead{font-size:14px; font-weight:600; margin-bottom:6px;}
+  .workRow{display:flex; align-items:center; gap:8px; padding:5px 0;}
+  .workRow > label{flex:1; font-size:15px; white-space:nowrap;}
+  .workRow button{width:48px; height:44px; font-size:22px; line-height:1;
+                  border:1px solid var(--line); border-radius:8px; background:#fff;}
+  .workRow input{width:76px; height:44px; font:inherit; font-size:18px; text-align:center;
+                 border:1px solid var(--line); border-radius:8px; background:#fff;}
+  .workRow input.workText{flex:0 1 196px; width:0; min-width:0; box-sizing:border-box;
+                          text-align:left; padding:0 10px; font-size:15px;}
+  .workRow input.on{border-color:var(--accent); background:#e6f2ef; font-weight:600;}
+  #work .askRow{margin-top:14px; flex-wrap:wrap;}
+
   #toast{
     position:fixed; left:50%; bottom:26px; transform:translateX(-50%);
     background:var(--ink); color:#fff; padding:11px 17px; border-radius:8px;
@@ -323,6 +345,19 @@
       <button id="askNo">やめる</button>
       <button id="askExtra" hidden></button>
       <button id="askYes" class="solid">はい</button>
+    </div>
+  </div>
+</div>
+
+<div id="work" hidden>
+  <div class="askBox">
+    <h3>作業量を入れてください</h3>
+    <p class="workNote">指図書から分からない作業だけです。やっていなければ 0 のまま「次へ」。</p>
+    <div id="workRows"></div>
+    <div class="askRow">
+      <button id="workNo">やめる</button>
+      <button id="workZero">全部 0 にする</button>
+      <button id="workOk" class="solid">次へ</button>
     </div>
   </div>
 </div>
@@ -534,8 +569,106 @@ $("#sendDiag").onclick = function(){
 };
 $("#saveOver").onclick = function(){ save("overwrite"); };
 $("#saveCopy").onclick = function(){ save("copy"); };
+/* ---------- チェック完了の前に入れる作業量 ----------
+   作業内容一覧のうち、指図書から分からない列(タッチアップ・ネジ山修正・P塗り・
+   オフライン対応・追加作業)。チェック完了のときに savePdf へ req.work で送り、
+   サーバーが完了ファイルの説明欄に書く(Code.js withWork_)。
+   作業指示一覧表では聞かない。まとめて開いているときは (1)(2)… ごとに聞く
+   (作業内容一覧は依頼No.の枝番ごとに1行のため)。 */
+var WORK_NUM=["タッチアップ","ネジ山修正","P塗り","オフライン対応"];
+var workInput={};      // ファイルID → {タッチアップ:9, …, 追加作業:"", 追加作業数:0}
+
+function workTargets(){
+  if(grp) return grp.map(function(m){ return {id:m.id, label:partLabel(m)+" "+m.no}; });
+  var p=parseSortName(curFile.name);
+  if(p && p.list) return [];                  // 作業指示一覧表
+  return [{id:curFile.id, label:p ? p.no+"  "+p.to : curFile.name}];
+}
+
+/* 追加作業は「内容」の行と「数」の行に分ける(1行だとタブレットの縦向きで収まらない) */
+function workTextRow(sec, val){
+  var row=document.createElement("div"); row.className="workRow";
+  var lb=document.createElement("label"); lb.textContent="追加作業"; row.appendChild(lb);
+  var tx=document.createElement("input");
+  tx.type="text"; tx.className="workText"; tx.placeholder="内容(あれば)";
+  tx.value=val||""; tx.dataset.key="追加作業"; tx.maxLength=60;
+  row.appendChild(tx);
+  sec.appendChild(row);
+}
+
+function workRow(sec, key, val, label){
+  var row=document.createElement("div"); row.className="workRow";
+  var lb=document.createElement("label"); lb.textContent=label||key; row.appendChild(lb);
+  var minus=document.createElement("button"); minus.type="button"; minus.innerHTML="&minus;";
+  var inp=document.createElement("input");
+  inp.type="number"; inp.inputMode="numeric"; inp.min="0"; inp.step="1";
+  inp.value=String(val||0); inp.dataset.key=key;
+  var plus=document.createElement("button"); plus.type="button"; plus.innerHTML="&plus;";
+  var mark=function(){ inp.classList.toggle("on", Number(inp.value)>0); };
+  var bump=function(d){ inp.value=String(Math.max(0, (Math.floor(Number(inp.value))||0)+d)); mark(); };
+  minus.onclick=function(){ bump(-1); };
+  plus.onclick=function(){ bump(1); };
+  inp.onfocus=function(){ inp.select(); };
+  inp.oninput=mark;
+  mark();
+  row.appendChild(minus); row.appendChild(inp); row.appendChild(plus);
+  sec.appendChild(row);
+}
+
+function openWork(targets, onOk){
+  var box=$("#workRows"); box.textContent="";
+  targets.forEach(function(t){
+    var prev=workInput[t.id]||{};
+    var sec=document.createElement("div"); sec.className="workSec"; sec.dataset.id=t.id;
+    if(targets.length>1){
+      var h=document.createElement("div"); h.className="workHead"; h.textContent=t.label; sec.appendChild(h);
+    }
+    WORK_NUM.forEach(function(k){ workRow(sec, k, prev[k]); });
+    workTextRow(sec, prev["追加作業"]);
+    workRow(sec, "追加作業数", prev["追加作業数"], "追加作業の数");
+    box.appendChild(sec);
+  });
+  $("#workOk").onclick=function(){
+    box.querySelectorAll(".workSec").forEach(function(sec){
+      var w={};
+      sec.querySelectorAll("input").forEach(function(inp){
+        var k=inp.dataset.key;
+        w[k] = inp.type==="text" ? inp.value.trim() : Math.max(0, Math.floor(Number(inp.value))||0);
+      });
+      workInput[sec.dataset.id]=w;
+    });
+    $("#work").hidden=true;
+    onOk();
+  };
+  $("#work").hidden=false;
+}
+$("#workNo").onclick=function(){ $("#work").hidden=true; };
+$("#workZero").onclick=function(){
+  $("#workRows").querySelectorAll("input").forEach(function(inp){
+    if(inp.type==="text") inp.value=""; else { inp.value="0"; inp.classList.remove("on"); }
+  });
+};
+
+/* 確認ダイアログに出す作業量の1行。0 のものは出さない */
+function workSummary(targets){
+  var parts=[];
+  targets.forEach(function(t){
+    var w=workInput[t.id]; if(!w) return;
+    var s=WORK_NUM.filter(function(k){ return w[k]>0; }).map(function(k){ return k+" "+w[k]; });
+    if(w["追加作業"] || w["追加作業数"]>0) s.push((w["追加作業"]||"追加作業")+" "+(w["追加作業数"]||0));
+    parts.push((targets.length>1 ? t.label.split(" ")[0]+" " : "") + (s.length ? s.join("・") : "なし"));
+  });
+  return parts.length ? "作業量: " + parts.join(" / ") + "\n\n" : "";
+}
+
 $("#saveDone").onclick = function(){
   if(!curFile) return;
+  var targets=workTargets();
+  if(!targets.length) return confirmDone([]);
+  openWork(targets, function(){ confirmDone(targets); });
+};
+
+function confirmDone(targets){
   var photoLine = photos.length
     ? "現品の写真 " + photos.length + " 枚を末尾に追加します。\n\n"
     : "現品の写真はまだありません。\n\n";
@@ -543,14 +676,14 @@ $("#saveDone").onclick = function(){
   if(grp) photoLine = photos.length
     ? "現品の写真を、撮ったときに開いていた指図書の末尾に追加します。\n" + photoSplit() + "\n\n"
     : photoLine;
-  ask(photoLine + "チェック完了として ◆チェック完了 に保存します。\n\n保存後、元の "
+  ask(workSummary(targets) + photoLine + "チェック完了として ◆チェック完了 に保存します。\n\n保存後、元の "
     + (grp ? grp.map(partLabel).join("") + " の " + grp.length + " 枚" : curFile.name)
     + " はゴミ箱へ移動します。\n(30日間は Drive のゴミ箱から戻せます)",
     function(){ save("done"); },
     photos.length ? null : { yes:"写真なしで保存", extra:{ label:"写真を撮る", fn:function(){
-        $("#photoInput").click();
+        $("#photoInput").click();      // 撮ったあと、もう一度チェック完了を押すと入れた作業量が残っている
     }}});
-};
+}
 
 function setDirty(v){
   dirty=v;
@@ -1144,6 +1277,7 @@ function saveGroup(mode){
     photos.forEach(function(b, k){ if(grpMemberAt(photoPages[k]||1)===m) ph.push(b); });
     return buildPdfFrom(m.bytes, mk, mode==="done" ? ph : null).then(function(bytes){
       var req={fileId:m.id, data:bytesToB64(bytes), mode:mode};
+      if(mode==="done" && workInput[m.id]) req.work=workInput[m.id];
       if(mode!=="done"){
         req.marks=JSON.stringify({pages:m.pages, marks:mk});
         req.baseSource=m.baseSource;
@@ -2162,6 +2296,7 @@ function save(mode){
     // 一覧表はチェック完了でも書き込みを送る(訂正版に写せるよう、完了したものにも残す)
     var wl=parseSortName(curFile.name); wl=!!(wl && wl.list);
     if(carryPending) req.carry=true;
+    if(mode==="done" && workInput[curFile.id]) req.work=workInput[curFile.id];
     if(mode!=="done" || wl){
       req.marks = JSON.stringify({pages: pageCount, marks: packMarks()});
       req.baseSource = baseSource;
@@ -2203,7 +2338,7 @@ function save(mode){
 
 /* チェック完了で元ファイルが消えるため、開いている状態も閉じる */
 function closeFile(){
-  curFile=null; grp=null; pdfDoc=null; srcBytes=null;
+  curFile=null; grp=null; pdfDoc=null; srcBytes=null; workInput={};
   marks={}; pageNo=1; pageCount=0; zoom=1; setDirty(false);
   sheet.hidden=true; hint.hidden=false;
   ["prev","next","undo","clear","saveOver","saveCopy","saveDone","zoomIn","zoomOut","zoomLbl","photo","closeBtn"].forEach(function(id){
