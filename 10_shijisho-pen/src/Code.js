@@ -536,21 +536,35 @@ function loadPdf(fileId) {
   // 書き込みが焼き込まれたファイル本体は送らない(そのぶん速い)。
   // 一度も保存していないファイル(途中保存の印なし)は棚を探さない。
   var shelf = isSaved_(meta) ? readShelf_(meta) : null;
+  var work = workOf_(meta.description);     // 上書き保存のときに入れた作業量(開き直しても残す)
   if (shelf) {
     return {
       id: fileId,
       name: meta.name,
       data: Utilities.base64Encode(shelf.base.getBytes()),
       marks: shelf.marks,
-      pages: shelf.pages
+      pages: shelf.pages,
+      work: work
     };
   }
 
   return {
     id: fileId,
     name: meta.name,
-    data: Utilities.base64Encode(DriveApp.getFileById(fileId).getBlob().getBytes())
+    data: Utilities.base64Encode(DriveApp.getFileById(fileId).getBlob().getBytes()),
+    work: work
   };
+}
+
+/** 説明欄の作業量。行が無ければ null */
+function workOf_(desc) {
+  var info = readInfo_(desc);
+  var has = INFO_WORK_NUM_KEYS.concat([INFO_EXTRA, INFO_EXTRA_QTY]).some(function (k) { return k in info; });
+  if (!has) return null;
+  var w = {};
+  INFO_WORK_NUM_KEYS.concat([INFO_EXTRA_QTY]).forEach(function (k) { w[k] = Number(info[k]) || 0; });
+  w[INFO_EXTRA] = info[INFO_EXTRA] && info[INFO_EXTRA] !== '内容なし' ? info[INFO_EXTRA] : '';
+  return w;
 }
 
 
@@ -798,7 +812,10 @@ function savePdf(req) {
     var props = savedProps_();
     props[SHELF_BASE_PROP] = got.base.id;
     props[SHELF_MARKS_PROP] = got.marks.id;
-    var updated = Drive.Files.update({ properties: props }, req.fileId, blob,
+    var upMeta = { properties: props };
+    // 作業量を入れてあれば、途中保存のコピーの説明欄にも残す(開き直したとき戻す。完了日時はまだ付けない)
+    if (req.work && !isWorkListName_(original.name)) upMeta.description = withWork_(original.description, req.work, true);
+    var updated = Drive.Files.update(upMeta, req.fileId, blob,
                                      { supportsAllDrives: true, fields: 'id,md5Checksum' });
     if (updated.md5Checksum && updated.md5Checksum !== md5) {
       putShelfMarks_(req.fileId, req.marks, updated.md5Checksum, got.marks);   // 念のため合わせる
@@ -926,7 +943,7 @@ function saveDone_(fileId, original, blob) {
  * @param {string} desc  今の説明欄
  * @param {Object} work  画面から来た {タッチアップ: 9, ..., 追加作業: '', 追加作業数: 0}
  */
-function withWork_(desc, work) {
+function withWork_(desc, work, noTime) {
   work = work || {};
   var keep = String(desc || '').split(/\r?\n/).filter(function (line) {
     if (!line.trim()) return false;
@@ -946,8 +963,10 @@ function withWork_(desc, work) {
     lines.push(INFO_EXTRA + ':' + (extra || '内容なし'));
     lines.push(INFO_EXTRA_QTY + ':' + extraQty);
   }
-  lines.push(INFO_DONE_AT + ':' +
-             Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Tokyo', 'yyyy/MM/dd HH:mm'));
+  if (!noTime) {
+    lines.push(INFO_DONE_AT + ':' +
+               Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Tokyo', 'yyyy/MM/dd HH:mm'));
+  }
   return keep.concat(lines).join('\n');
 }
 

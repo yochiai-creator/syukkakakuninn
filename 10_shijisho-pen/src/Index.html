@@ -636,7 +636,10 @@ function openWork(targets, onOk){
         var k=inp.dataset.key;
         w[k] = inp.type==="text" ? inp.value.trim() : Math.max(0, Math.floor(Number(inp.value))||0);
       });
-      workInput[sec.dataset.id]=w;
+      // 何も入れていない指図書は覚えない(覚えると上書きで途中保存になってしまう)。
+      // 前に入れてあったものを 0 に戻したときは、0 を覚えて保存し直せるようにする
+      var id=sec.dataset.id;
+      if(workParts(w).length || workInput[id]) workInput[id]=w;
     });
     $("#work").hidden=true;
     onOk();
@@ -657,6 +660,39 @@ function workParts(w){
   var s=WORK_NUM.filter(function(k){ return w[k]>0; }).map(function(k){ return k+" "+w[k]; });
   if(w["追加作業"] || w["追加作業数"]>0) s.push((w["追加作業"]||"追加作業")+" "+(w["追加作業数"]||0));
   return s;
+}
+
+/* 表紙に出す作業量の文。何も無ければ "" */
+function workLabel(w){
+  var s=workParts(w);
+  return s.length ? "作業量  " + s.join("・") : "";
+}
+
+/* いま見ているページが表紙なら、その指図書の作業量の文 */
+function coverWorkText(page){
+  if(!curFile) return "";
+  if(grp){
+    var g=grpPages[page-1];
+    return g && g.local===1 ? workLabel(workInput[g.m.id]) : "";
+  }
+  var p=parseSortName(curFile.name);
+  if(page!==1 || (p && p.list)) return "";
+  return workLabel(workInput[curFile.id]);
+}
+
+/* 表紙の左上(処理日の行の左、枠の上)に作業量の札を描く。W,H はページの大きさ(描く先の単位) */
+function paintWorkLabel(ctx, text, W, H){
+  var fs=H*0.0125, pad=fs*0.45, x=W*0.025, y=H*0.004;
+  ctx.save();
+  ctx.font="bold "+fs+"px -apple-system, 'Hiragino Sans', 'Noto Sans JP', sans-serif";
+  var maxW=W*0.62, tw=ctx.measureText(text).width;
+  if(tw>maxW){ fs=fs*maxW/tw; ctx.font="bold "+fs+"px -apple-system, 'Hiragino Sans', 'Noto Sans JP', sans-serif"; tw=maxW; pad=fs*0.45; }
+  var w=tw+pad*2, h=fs+pad*1.6;
+  ctx.fillStyle="rgba(255,255,255,.94)"; ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle="#0b4f6c"; ctx.lineWidth=Math.max(1, fs*0.12); ctx.strokeRect(x, y, w, h);
+  ctx.fillStyle="#0b4f6c"; ctx.textBaseline="middle";
+  ctx.fillText(text, x+pad, y+h/2);
+  ctx.restore();
 }
 
 /* 作業量ボタン: 一覧表では使えない。入れてあれば色を付ける */
@@ -686,6 +722,7 @@ $("#workBtn").onclick = function(){
   if(!targets.length) return;
   openWork(targets, function(){
     updateWorkBtn();
+    if(pdfDoc) redraw();                 // 表紙の札を描き直す
     var s=workSummary(targets).trim();
     toast(s || "作業量なし(0)にしました");
   });
@@ -1202,6 +1239,7 @@ function loadOne(id){
 /* loadPdf の返事から、書き込む前のPDFと書き込みを取り出す */
 function prepMember(res, f){
   var p=parseSortName(f.name);
+  if(res.work) workInput[res.id]=res.work;
   var m={id:res.id, name:res.name, no:p ? p.no : res.name, part:orderPart(p) || 1,
          qty:Number(f.qty)||0, bytes:b64ToBytes(res.data), marks:{}, baseSource:"file"};
   return pdfjsLib.getDocument({data: m.bytes.slice()}).promise.then(function(doc){
@@ -1231,6 +1269,7 @@ function doOpenGroup(files){
         return null;
       }
     }
+    workInput={};                     // 別のファイルで入れた(保存していない)作業量は持ち越さない
     return Promise.all(list.map(function(res, i){ return prepMember(res, files[i]); }));
   }).then(function(members){
     if(!members) return;
@@ -1300,12 +1339,13 @@ function saveGroup(mode){
       if(list && list.length){ mk[String(n)]=list; has=true; }
     }
     // 一度も保存していない、書き込みも無い指図書は、上書きしても何も変わらない
-    if(mode==="overwrite" && !has && m.baseSource==="file") return Promise.resolve();
+    if(mode==="overwrite" && !has && m.baseSource==="file" && !workInput[m.id]) return Promise.resolve();
     var ph=[];
     photos.forEach(function(b, k){ if(grpMemberAt(photoPages[k]||1)===m) ph.push(b); });
-    return buildPdfFrom(m.bytes, mk, mode==="done" ? ph : null).then(function(bytes){
+    return buildPdfFrom(m.bytes, mk, mode==="done" ? ph : null, workLabel(workInput[m.id])).then(function(bytes){
       var req={fileId:m.id, data:bytesToB64(bytes), mode:mode};
       if(mode==="done") req.work=workInput[m.id] || {};      // 入れていなければ全部 0
+      else if(workInput[m.id]) req.work=workInput[m.id];     // 途中保存にも残す
       if(mode!=="done"){
         req.marks=JSON.stringify({pages:m.pages, marks:mk});
         req.baseSource=m.baseSource;
@@ -1527,6 +1567,8 @@ function labelPng(text){
 
 function mountPdf(res, note){
   curFile={id:res.id, name:res.name};
+  workInput={};                                  // 別のファイルで入れた(保存していない)作業量は持ち越さない
+  if(res.work) workInput[res.id]=res.work;      // 上書き保存のときに入れた作業量
   grp=null;
   carryPending=false;
   srcBytes=b64ToBytes(res.data);
@@ -2039,6 +2081,8 @@ function redraw(){
   inkCtx.clearRect(0,0,view.w,view.h);
   var list=marks[pageNo]||[];
   for(var i=0;i<list.length;i++) paint(inkCtx, list[i], view.w, view.h, 1);
+  var wt=coverWorkText(pageNo);
+  if(wt) paintWorkLabel(inkCtx, wt, view.w, view.h);
   updateInkButtons();
   redrawCount++;
   // iPad で、キャンバスに描いたのに画面に出ないことがある。見た目が
@@ -2326,6 +2370,7 @@ function save(mode){
     var wl=parseSortName(curFile.name); wl=!!(wl && wl.list);
     if(carryPending) req.carry=true;
     if(mode==="done" && !wl) req.work=workInput[curFile.id] || {};    // 入れていなければ全部 0
+    if(mode==="overwrite" && !wl && workInput[curFile.id]) req.work=workInput[curFile.id];   // 途中保存にも残す
     if(mode!=="done" || wl){
       req.marks = JSON.stringify({pages: pageCount, marks: packMarks()});
       req.baseSource = baseSource;
@@ -2376,11 +2421,12 @@ function closeFile(){
 }
 
 function buildPdf(withPhotos){
-  return buildPdfFrom(srcBytes, marks, withPhotos ? photos : null);
+  var p=parseSortName(curFile ? curFile.name : ""), cover=(p && p.list) ? "" : workLabel(workInput[curFile && curFile.id]);
+  return buildPdfFrom(srcBytes, marks, withPhotos ? photos : null, cover);
 }
 
 /* 書き込む前のPDF bytes に書き込み mk(ページ番号→一覧)を焼き込み、写真 photoList を末尾に足す */
-function buildPdfFrom(bytes, mk, photoList){
+function buildPdfFrom(bytes, mk, photoList, coverText){
   var PDFDocument = PDFLib.PDFDocument;
   // ハンコの字がフォント未読込のまま焼き込まれないように待つ
   var fontReady = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
@@ -2409,6 +2455,18 @@ function buildPdfFrom(bytes, mk, photoList){
             p.drawImage(img, {x:0, y:0, width:sz.width, height:sz.height});
           });
       });
+    });
+
+    // 作業量を表紙(1ページ目)の左上に書く
+    if(coverText && pages[0]) chain = chain.then(function(){
+      var p=pages[0], sz=p.getSize(), S=3;
+      var off=document.createElement("canvas");
+      off.width=Math.round(sz.width*S); off.height=Math.round(sz.height*S);
+      paintWorkLabel(off.getContext("2d"), coverText, off.width, off.height);
+      return new Promise(function(res){ off.toBlob(res, "image/png"); })
+        .then(function(blob){ return blob.arrayBuffer(); })
+        .then(function(buf){ return out.embedPng(buf); })
+        .then(function(img){ p.drawImage(img, {x:0, y:0, width:sz.width, height:sz.height}); });
     });
 
     return chain
