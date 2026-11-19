@@ -313,6 +313,34 @@ function restoreDroppedHead_(code, dest) {
   return hits.length === 1 ? hits[0] : code;
 }
 
+/**
+ * 1文字落として読んだコードが、たまたまマスタの別の得意先に当たったもの(1659 トーエル を 165 伊藤忠 網走)を戻す。
+ * マスタにあっても、その名前が出荷先の読みとまったく合わないとき(0.2 未満)だけ見る。
+ * 前か後ろに1文字足すとマスタにあり、名前もよく合う(0.3 以上)ものにする。
+ */
+var MISREAD_NAME_MAX = 0.2, MISREAD_NAME_MIN = 0.3;
+function fixShortCode_(code, dest) {
+  if (!code || !dest) return code;
+  var c = customerNames_(), key = codeKey_(code);
+  var own = c.names[key];
+  if (!own) return code;
+  var score = function (k) {
+    var best = 0;
+    (c.names[k] || []).forEach(function (n) { best = Math.max(best, nameScore_(n, dest)); });
+    return best;
+  };
+  if (score(key) >= MISREAD_NAME_MAX) return code;
+  // 候補が複数(トーエル 土浦 と トーエル 水戸 など)なら、名前が一番合うものが2番目より はっきり(0.2 以上)合うときだけ
+  var hits = Object.keys(c.names).filter(function (k) {
+    return k.length === key.length + 1 && (k.slice(0, -1) === key || k.slice(1) === key) &&
+           score(k) >= MISREAD_NAME_MIN;
+  }).map(function (k) { return { k: k, s: score(k) }; })
+    .sort(function (x, y) { return y.s - x.s; });
+  if (!hits.length) return code;
+  if (hits.length > 1 && hits[0].s - hits[1].s < 0.2) return code;
+  return hits[0].k;
+}
+
 /** HXP99261~HXP99285 → 25。頭の英字が違う・逆順・1000本以上なら 0(数えない) */
 function countRange_(range) {
   var m = String(range || '').match(/^([A-Z]{1,4})(\d{3,7})~([A-Z]{1,4})(\d{3,7})$/);
@@ -657,6 +685,7 @@ function sortOne_(file, sizeFolders, doneNames, result) {
   var destRead = extractDestination_(text);
   code = pickCustomerByName_(code, destRead);
   code = restoreDroppedHead_(code, destRead);
+  code = fixShortCode_(code, destRead);
   var to = lookupCustomer_(code, destRead);
 
   if (!to) {
@@ -1838,7 +1867,7 @@ function renameCopiesFromMaster_() {
       meta.description = writeInfo_(info);           // 次からはコードで引ける
     }
 
-    var restored = restoreDroppedHead_(code, info[INFO_DEST]);
+    var restored = fixShortCode_(restoreDroppedHead_(code, info[INFO_DEST]), info[INFO_DEST]);
     if (restored !== code) {
       code = restored;
       info[INFO_CODE] = code;
