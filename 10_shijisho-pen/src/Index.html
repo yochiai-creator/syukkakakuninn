@@ -211,6 +211,12 @@
           max-width:min(460px, 100%); box-shadow:0 12px 40px rgba(0,0,0,.3);}
   #askMsg{margin:0 0 18px; font-size:15px; line-height:1.7; white-space:pre-line;}
   .askRow{display:flex; gap:8px; justify-content:flex-end;}
+  /* まとめて開いたときのチェック完了: どの指図書を完了にするか */
+  #askPick{margin:-6px 0 16px; display:flex; flex-direction:column; gap:6px;}
+  #askPick label{display:flex; align-items:center; gap:10px; padding:8px 10px; border:1px solid var(--line);
+                 border-radius:8px; background:#fff; font-size:15px;}
+  #askPick input{width:22px; height:22px; margin:0;}
+  #askPick small{color:#5c5f66; margin-left:auto; font-size:13px;}
   .askRow button{min-width:88px;}
 
   /* チェック完了の前に入れる作業量。タブレットで指で押しやすいよう、
@@ -342,6 +348,7 @@
 <div id="ask" hidden>
   <div class="askBox">
     <p id="askMsg"></p>
+    <div id="askPick" hidden></div>
     <div class="askRow">
       <button id="askNo">やめる</button>
       <button id="askExtra" hidden></button>
@@ -378,6 +385,8 @@ var pdfCtx=pdfCv.getContext("2d"), inkCtx=inkCv.getContext("2d");
 
 var srcBytes=null, pdfDoc=null, curFile=null;
 var grp=null;   // 分かれた指図書をまとめて開いているとき: [{id,name,no,bytes,marks,start,pages,baseSource}]
+var grpFiles=[];   // まとめて開いたときの一覧の行(一部だけチェック完了したあと、残りを開き直すのに使う)
+var keepPhotos=[]; // 開き直したあとに戻す写真 [{id, bytes}]
 var pageNo=1, pageCount=0, marks={}, dirty=false;
 var view={w:0,h:0,dpr:1};
 var zoom=1, fitScale=1;
@@ -511,6 +520,7 @@ function ask(msg, onYes, opts){
     askExtraFn = null;
   }
 
+  $("#askPick").hidden = !opts.pick;
   $("#ask").hidden = false;
   askFn = onYes;
 }
@@ -741,13 +751,54 @@ function confirmDone(targets){
   if(grp) photoLine = photos.length
     ? "現品の写真を、撮ったときに開いていた指図書の末尾に追加します。\n" + photoSplit() + "\n\n"
     : photoLine;
-  ask(workSummary(targets) + photoLine + "チェック完了として ◆チェック完了 に保存します。\n\n保存後、元の "
-    + (grp ? grp.map(partLabel).join("") + " の " + grp.length + " 枚" : curFile.name)
-    + " はゴミ箱へ移動します。\n(30日間は Drive のゴミ箱から戻せます)",
-    function(){ save("done"); },
-    photos.length ? null : { yes:"写真なしで保存", extra:{ label:"写真を撮る", fn:function(){
+  var opts = photos.length ? {} : { yes:"写真なしで保存", extra:{ label:"写真を撮る", fn:function(){
         $("#photoInput").click();      // 入れた作業量は、開いている間は残っている
-    }}});
+    }}};
+  if(grp){
+    // まとめて開いたときは、どれをチェック完了にするか選べる(はじめは全部)
+    buildDonePick();
+    opts.pick = true;
+    ask(workSummary(targets) + photoLine + "チェック完了にする指図書を選んでください。\n" +
+        "選んだものは ◆チェック完了 に保存し、元はゴミ箱へ(30日間は戻せます)。\n" +
+        "選ばなかったものは途中保存して、開き直します。",
+      function(){
+        var ids=[];
+        document.querySelectorAll("#askPick input:checked").forEach(function(c){ ids.push(c.value); });
+        if(!ids.length){ toast("チェック完了にする指図書が選ばれていません"); return; }
+        if(ids.length===grp.length) save("done"); else saveGroup("done", ids);
+      }, opts);
+    return;
+  }
+  ask(workSummary(targets) + photoLine + "チェック完了として ◆チェック完了 に保存します。\n\n保存後、元の "
+    + curFile.name + " はゴミ箱へ移動します。\n(30日間は Drive のゴミ箱から戻せます)",
+    function(){ save("done"); }, opts);
+}
+
+/* まとめて開いたときのチェック完了の選択肢: (1) 26-30654-0(1)  2本 */
+function buildDonePick(){
+  var box=$("#askPick"); box.textContent="";
+  grp.forEach(function(m){
+    var lb=document.createElement("label");
+    var cb=document.createElement("input"); cb.type="checkbox"; cb.value=m.id; cb.checked=true;
+    lb.appendChild(cb);
+    lb.appendChild(document.createTextNode(partLabel(m)+"  "+m.no));
+    var sm=document.createElement("small"); sm.textContent=m.qty ? m.qty+"本" : ""; lb.appendChild(sm);
+    box.appendChild(lb);
+  });
+}
+
+/* 開き直したあと、選ばなかった指図書で撮った写真を戻す(その指図書の表紙で撮ったことにする) */
+function restoreKeptPhotos(){
+  if(!keepPhotos.length) return;
+  keepPhotos.forEach(function(k){
+    var page=1;
+    if(grp){
+      for(var i=0;i<grpPages.length;i++){ if(grpPages[i].m.id===k.id && grpPages[i].local===1){ page=i+1; break; } }
+    } else if(!curFile || curFile.id!==k.id) return;
+    photos.push(k.bytes); photoPages.push(page);
+  });
+  keepPhotos=[];
+  updatePhotoBtn();
 }
 
 function setDirty(v){
@@ -1302,6 +1353,7 @@ function doOpenGroup(files){
       grpPages=order;
       curFile={id:members[0].id, name:members[0].no.replace(/\(\d+\)$/, "") + " " + members.map(partLabel).join("")};
       grp=members;
+      grpFiles=files;
       carryPending=false;
       srcBytes=bytes;
       marks=all; pageNo=1; setDirty(false); penSeen=false; zoom=1;
@@ -1316,6 +1368,7 @@ function doOpenGroup(files){
       updateZoomLbl();
       markCurrent();
       toast(curFile.name + " をまとめて開きました(" + pageCount + "ページ)");
+      restoreKeptPhotos();
     });
   }).catch(function(err){
     console.error(err);
@@ -1324,15 +1377,24 @@ function doOpenGroup(files){
 }
 
 /* まとめて開いたものの保存。1枚ずつ、その指図書のページの書き込みだけを送る */
-function saveGroup(mode){
+/* pick: チェック完了にする指図書の ID(一部だけのとき)。選ばなかった指図書は先に途中保存し、
+   終わったら残りだけを開き直す */
+function saveGroup(mode, pick){
   if(mode!=="overwrite" && mode!=="done") return;
   var btns=[$("#saveOver"), $("#saveDone")];
   var label = mode==="overwrite" ? $("#saveOver") : $("#saveDone");
   var old = label.textContent;
   btns.forEach(function(b){ b.disabled=true; });
-  var members=grp.slice(), okParts=[], i=0;
+  var all=grp.slice(), okParts=[], i=0;
+  var partial = mode==="done" && pick && pick.length < all.length;
+  var doneSet = partial ? all.filter(function(m){ return pick.indexOf(m.id)>=0; }) : (mode==="done" ? all : []);
+  var rest = partial ? all.filter(function(m){ return pick.indexOf(m.id)<0; }) : (mode==="done" ? [] : all);
+  // 残すものの途中保存を先に(途中で止まっても書き込みが残るように)、それからチェック完了
+  var jobs = rest.map(function(m){ return {m:m, mode:"overwrite"}; })
+    .concat(doneSet.map(function(m){ return {m:m, mode:"done"}; }));
+  var members = doneSet.length ? doneSet : all;     // 知らせに出す指図書
 
-  var one=function(m){
+  var one=function(m, mode){
     var mk={}, has=false;
     for(var n=1;n<=m.pages;n++){
       var list=marks[String(m.at[n])];
@@ -1368,15 +1430,32 @@ function saveGroup(mode){
     });
   };
 
+  var doneParts=[];
   var next=function(){
-    if(i>=members.length) return Promise.resolve();
-    var m=members[i++];
-    label.textContent="保存中… " + i + "/" + members.length;
-    return one(m).then(next);
+    if(i>=jobs.length) return Promise.resolve();
+    var j=jobs[i++];
+    label.textContent="保存中… " + i + "/" + jobs.length;
+    return one(j.m, j.mode).then(function(){ if(j.mode==="done") doneParts.push(partLabel(j.m)); }).then(next);
   };
 
   next().then(function(){
     setDirty(false);
+    if(partial){
+      // 残りで撮った写真は開き直したあとに戻す
+      keepPhotos=[];
+      photos.forEach(function(b, k){
+        var m=grpMemberAt(photoPages[k]||1);
+        if(m && rest.indexOf(m)>=0) keepPhotos.push({id:m.id, bytes:b});
+      });
+      var restIds=rest.map(function(m){ return m.id; });
+      var restFiles=grpFiles.filter(function(f){ return restIds.indexOf(f.id)>=0; });
+      toast("チェック完了 " + doneParts.join("") + " を保存しました。残りを開き直します");
+      clearPhotos();
+      closeFile();
+      refreshFiles();
+      if(restFiles.length>=2) doOpenGroup(restFiles); else if(restFiles.length===1) doOpenFile(restFiles[0]);
+      return;
+    }
     if(mode==="done"){
       toast("チェック完了 " + members.map(partLabel).join("") + " を保存、元ファイルはゴミ箱へ");
       clearPhotos();
@@ -1387,10 +1466,11 @@ function saveGroup(mode){
     refreshFiles();
   }).catch(function(err){
     console.error(err);
-    var m=members[i-1];
+    var m=jobs[i-1].m;
     if(mode==="done"){
       // できた分はもうチェック完了にある。残りは一覧から開き直す
-      toast((okParts.length ? okParts.join("") + " はチェック完了。" : "") +
+      keepPhotos=[];
+      toast((doneParts.length ? doneParts.join("") + " はチェック完了。" : "") +
             partLabel(m) + " で保存できませんでした: " + (err.message||err) + "。残りは一覧から開き直してください");
       clearPhotos();
       closeFile();
@@ -1599,6 +1679,7 @@ function mountPdf(res, note){
     markCurrent();
     toast(note || (restored ? curFile.name + "(前回の書き込みを直せます)" : curFile.name));
     if(res.after) res.after();
+    restoreKeptPhotos();
   }).catch(function(err){
     console.error(err);
     toast("PDFを表示できませんでした");
