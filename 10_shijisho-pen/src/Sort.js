@@ -276,8 +276,9 @@ function buildRevisionIndex_(months) {
 /**
  * いちばん新しい前の版。無ければ null。
  * - 同じ依頼No. で出荷日が違うもの
- * - 出荷日が同じで、依頼No. の (1) の有無だけ違い、最初の容器No. が同じもの。
+ * - 依頼No. の (1) の有無だけ違い、最初の容器No. が同じもの(出荷日は同じでも違っても)。
  *   26-60884-0(1) が名前を 26-60884-0 に変えて届き直したことがある。
+ *   26-10927-0(1) は出荷日も 11/25 → 11/24 に変わり、表紙が読めず (1) の無い名前で届いた。
  *   26-30618-0 と -0(1) のように別の注文のこともあるので、容器No. で見分ける
  *   (同じ容器が2つの注文に載ることはない)
  */
@@ -290,7 +291,7 @@ function previousVersion_(orderNo, date, first) {
   var base = orderBase_(orderNo);
   Object.keys(idx.versions).forEach(function (no) {
     if (no === orderNo || orderBase_(no) !== base) return;
-    idx.versions[no].forEach(function (v) { if (v.key === date && v.first === first) pick(v); });
+    idx.versions[no].forEach(function (v) { if (v.first === first) pick(v); });
   });
   return prev;
 }
