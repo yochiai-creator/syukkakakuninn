@@ -213,6 +213,7 @@
   .askRow{display:flex; gap:8px; justify-content:flex-end;}
   /* まとめて開いたときのチェック完了: どの指図書を完了にするか */
   #askPick{margin:-6px 0 16px; display:flex; flex-direction:column; gap:6px;}
+  #askPick[hidden]{display:none;}   /* display:flex が hidden を打ち消すので明示する */
   #askPick label{display:flex; align-items:center; gap:10px; padding:8px 10px; border:1px solid var(--line);
                  border-radius:8px; background:#fff; font-size:15px;}
   #askPick input{width:22px; height:22px; margin:0;}
