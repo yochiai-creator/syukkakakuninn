@@ -504,9 +504,11 @@ function collectFolderIds_(root) {
 function loadPdf(fileId) {
   // 名前・種類・目印・指紋を1回で取る
   var meta = Drive.Files.get(fileId, {
-    supportsAllDrives: true, fields: 'id,name,mimeType,properties,md5Checksum,description'
+    supportsAllDrives: true, fields: 'id,name,mimeType,properties,md5Checksum,description,trashed'
   });
   if (meta.mimeType !== PDF_MIME) throw new Error('PDFではありません: ' + meta.name);
+  // ゴミ箱のもの(チェック完了して元を片付けたもの)は開かない。一覧に残って見えても、未チェックとして書き込ませない
+  if (meta.trashed) throw new Error('チェック完了済み(ゴミ箱)です。一覧を開き直してください: ' + meta.name);
 
   // 作業指示一覧表の訂正版で、まだ前の版のチェックを写していなければ、それも渡す(アプリで写す)
   if (isWorkListName_(meta.name)) {

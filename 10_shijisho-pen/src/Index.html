@@ -916,6 +916,7 @@ function showSaved(){
 
   google.script.run
     .withSuccessHandler(function(list){
+      list = dropDone(list);
       var box=$("#files"); box.innerHTML="";
       if(!list.length){ box.innerHTML='<p class="msg">途中保存のファイルはありません。</p>'; return; }
       list.forEach(function(f){ box.appendChild(fileRow(f)); });
@@ -1019,7 +1020,12 @@ function renderDay(data, day){
   var sorted=day.files.slice().sort(function(a,b){
     var pa=parseSortName(a.name), pb=parseSortName(b.name);
     if(!!pa.list!==!!pb.list) return pa.list ? -1 : 1;      // 作業指示一覧を先頭に
-    return pa.no<pb.no ? -1 : pa.no>pb.no ? 1 : (a.name<b.name ? -1 : 1);
+    // 同じ依頼No. の (n) は数で並べる((10) を (1) と (2) の間に入れない)
+    var ba=String(pa.no).replace(/\(\d+\)$/,""), bb=String(pb.no).replace(/\(\d+\)$/,"");
+    if(ba!==bb) return ba<bb ? -1 : 1;
+    var na=orderPart(pa), nb=orderPart(pb);
+    if(na!==nb) return na-nb;
+    return a.name<b.name ? -1 : 1;
   });
   var groups=splitGroups(sorted), shown={};
   sorted.forEach(function(f){
@@ -1082,6 +1088,7 @@ function openFolder(id){
   else $("#files").innerHTML='<p class="msg">読み込み中…</p>';
   google.script.run
     .withSuccessHandler(function(data){
+      data.files = dropDone(data.files);              // 完了したばかりのものが返ってきても出さない
       folderMemo[key]=data; folderMemo[data.id]=data;
       if(mine===folderReq) renderFolder(data);      // 後から別のフォルダを開いていたら描かない
     })
@@ -1100,7 +1107,13 @@ function openFolder(id){
 }
 
 /* 保存のあと、覚えている一覧にも反映しておく(取り直しを待たない) */
+/* このアプリでチェック完了したファイル。Drive は、ゴミ箱へ移した直後もしばらく一覧に
+   返すことがある(50573 の (1) を完了した直後に「未」で出直した)。一覧から外し、まとめて開くにも入れない */
+var doneIds = {};
+function dropDone(files){ return (files||[]).filter(function(f){ return !doneIds[f.id]; }); }
+
 function forgetFileInMemo(id, saved){
+  if(!saved) doneIds[id]=true;
   Object.keys(folderMemo).forEach(function(k){
     var d=folderMemo[k];
     d.files = d.files.filter(function(f){ return f.id!==id || saved; });
@@ -1123,6 +1136,7 @@ function runSearch(k){
   $("#crumb").textContent='"'+k+'" を配下すべてから検索';
   google.script.run
     .withSuccessHandler(function(list){
+      list = dropDone(list);
       var box=$("#files"); box.innerHTML="";
       if(!list.length){ box.innerHTML='<p class="msg">見つかりませんでした。</p>'; return; }
       list.forEach(function(f){ box.appendChild(fileRow(f)); });
@@ -1309,6 +1323,9 @@ function prepMember(res, f){
 }
 
 function doOpenGroup(files){
+  files = dropDone(files);
+  if(!files.length){ toast("もうチェック完了しています"); return; }
+  if(files.length===1){ doOpenFile(files[0]); return; }
   closeDrawer();
   toast("まとめて読み込み中…(" + files.length + "枚)");
   Promise.all(files.map(function(f){ return loadOne(f.id); })).then(function(list){
