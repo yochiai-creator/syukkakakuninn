@@ -1628,13 +1628,13 @@ function openRevision(res){
     }).then(function(){ return data; });
   }).then(function(data){
     var p = res.prev[0];
-    mountPdf({id: res.id, name: res.name, data: data},
+    mountPdf({id: res.id, name: res.name, data: data, work: res.work},
       "訂正版です。" + firstOld + " ページ目から後ろは前の版(" + dayText(p.date) + "出荷" +
       (p.state ? "・" + p.state : "") + ")です");
   }).catch(function(err){
     console.error(err);
     toast("前の版をつなげませんでした。訂正版だけ開きます");
-    mountPdf({id: res.id, name: res.name, data: res.data});
+    mountPdf({id: res.id, name: res.name, data: res.data, work: res.work});
   });
 }
 

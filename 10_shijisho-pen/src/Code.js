@@ -530,7 +530,8 @@ function loadPdf(fileId) {
       id: fileId,
       name: meta.name,
       data: Utilities.base64Encode(DriveApp.getFileById(fileId).getBlob().getBytes()),
-      prev: prev
+      prev: prev,
+      work: workOf_(meta.description)    // 前の版をつなぐときも、入れてあった特別作業を持ち越す
     };
   }
 
