@@ -788,10 +788,16 @@ function buildDonePick(){
   });
 }
 
-/* 開き直したあと、選ばなかった指図書で撮った写真を戻す(その指図書の表紙で撮ったことにする) */
+/* 開き直したあと、選ばなかった指図書で撮った写真や、途中保存で棚に置いた写真を戻す
+   (その指図書の表紙で撮ったことにする) */
 function restoreKeptPhotos(){
   if(!keepPhotos.length) return;
+  var seen={};
   keepPhotos.forEach(function(k){
+    // 持ち越した写真と、途中保存で棚に置いた写真は同じものがあるので1枚にする
+    var key=k.bytes.length + ":" + bytesToB64(k.bytes.subarray(0, 4096));
+    if(seen[key]) return;
+    seen[key]=1;
     var page=1;
     if(grp){
       for(var i=0;i<grpPages.length;i++){ if(grpPages[i].m.id===k.id && grpPages[i].local===1){ page=i+1; break; } }
@@ -804,6 +810,7 @@ function restoreKeptPhotos(){
 
 function setDirty(v){
   dirty=v;
+  if(!v) photosDirty=false;
   $("#dirty").classList.toggle("show", v);
 }
 window.addEventListener("beforeunload", function(e){
@@ -821,9 +828,8 @@ $("#browse").onclick = $("#browse2").onclick = openDrawer;
    からの書き込みだけ。 */
 function closeWithoutSaving(){
   var back=function(){ clearPhotos(); closeFile(); refreshFiles(); openDrawer(); };
-  if(!dirty && !photos.length){ back(); return; }
-  var what = dirty ? "保存していない書き込み" : "";
-  if(photos.length) what += (what ? "と" : "") + "現品の写真 " + photos.length + " 枚";
+  if(!dirty){ back(); return; }
+  var what = photosDirty ? "保存していない書き込みか現品の写真" : "保存していない書き込み";
   ask(what + "があります。\n保存せずに閉じますか？\n(最後に保存してからの分は消えます)",
       back, { yes:"保存せずに閉じる" });
 }
@@ -1306,6 +1312,7 @@ function loadOne(id){
 function prepMember(res, f){
   var p=parseSortName(f.name);
   if(res.work) workInput[res.id]=res.work;
+  shelfPhotos(res);
   var m={id:res.id, name:res.name, no:p ? p.no : res.name, part:orderPart(p) || 1,
          qty:Number(f.qty)||0, bytes:b64ToBytes(res.data), marks:{}, baseSource:"file"};
   return pdfjsLib.getDocument({data: m.bytes.slice()}).promise.then(function(doc){
@@ -1419,15 +1426,16 @@ function saveGroup(mode, pick){
       if(list && list.length){ mk[String(n)]=list; has=true; }
     }
     // 一度も保存していない、書き込みも無い指図書は、上書きしても何も変わらない
-    if(mode==="overwrite" && !has && m.baseSource==="file" && !workInput[m.id]) return Promise.resolve();
     var ph=[];
     photos.forEach(function(b, k){ if(grpMemberAt(photoPages[k]||1)===m) ph.push(b); });
+    if(mode==="overwrite" && !has && !ph.length && m.baseSource==="file" && !workInput[m.id]) return Promise.resolve();
     return buildPdfFrom(m.bytes, mk, mode==="done" ? ph : null, workLabel(workInput[m.id])).then(function(bytes){
       var req={fileId:m.id, data:bytesToB64(bytes), mode:mode};
       if(mode==="done") req.work=workInput[m.id] || {};      // 入れていなければ全部 0
       else if(workInput[m.id]) req.work=workInput[m.id];     // 途中保存にも残す
       if(mode!=="done"){
         req.marks=JSON.stringify({pages:m.pages, marks:mk});
+        req.photos=ph.map(bytesToB64);                      // 開き直したとき戻す
         req.baseSource=m.baseSource;
         if(m.baseSource==="embedded") req.base=bytesToB64(m.bytes);
       }
@@ -1687,6 +1695,7 @@ function mountPdf(res, note){
   srcBytes=b64ToBytes(res.data);
   marks={}; pageNo=1; setDirty(false); penSeen=false; zoom=1;
   clearPhotos();
+  shelfPhotos(res);
 
   var restored=false;
   pdfjsLib.getDocument({data: srcBytes.slice()}).promise.then(function(doc){
@@ -2362,8 +2371,15 @@ inkCv.addEventListener("pointerleave", endStroke);
 
 /* ---------- 現品写真 ---------- */
 /* チェック完了のときだけ、撮った写真をPDFの末尾に足す。
-   上書き保存や別名保存には入れない(元の枚数を勝手に増やさないため)。 */
+   上書き保存や別名保存ではPDFには入れず(元の枚数を勝手に増やさないため)、棚に置いておき、
+   開き直したときに戻す(前は途中保存しても写真が消え、撮り直しになっていた)。 */
 var photos=[], photoPages=[];   // photoPages: 撮ったときのページ(まとめて開いたときの振り分けに使う)
+var photosDirty=false;          // 写真を足した・消したのをまだ保存していない
+
+/* loadPdf の返事に棚の写真があれば、開いたあとに戻す分へ入れる */
+function shelfPhotos(res){
+  (res.photos || []).forEach(function(b64){ keepPhotos.push({id:res.id, bytes:b64ToBytes(b64)}); });
+}
 
 function updatePhotoBtn(){
   var b=$("#photo");
@@ -2387,7 +2403,7 @@ $("#photo").onclick = function(){
   ask("現品の写真が "+photos.length+" 枚あります。" + (grp ? "\n" + photoSplit() : ""),
       function(){ $("#photoInput").click(); },
       { yes:"追加する", extra:{ label:"全部消す", fn:function(){
-          clearPhotos(); toast("写真を消しました");
+          clearPhotos(); photosDirty=true; setDirty(true); toast("写真を消しました");
       }}});
 };
 
@@ -2404,6 +2420,7 @@ $("#photoInput").addEventListener("change", function(e){
   });
   chain.then(function(){
     updatePhotoBtn();
+    photosDirty=true; setDirty(true);
     toast(grp ? "写真は " + partLabel(grpMemberAt(pageNo)) + " に付けます(" + photoSplit() + ")"
               : "写真 "+photos.length+" 枚");
   }).catch(function(err){
@@ -2487,6 +2504,7 @@ function save(mode){
     if(mode==="overwrite" && !wl && workInput[curFile.id]) req.work=workInput[curFile.id];   // 途中保存にも残す
     if(mode!=="done" || wl){
       req.marks = JSON.stringify({pages: pageCount, marks: packMarks()});
+      if(!wl) req.photos = photos.map(bytesToB64);        // 開き直したとき戻す
       req.baseSource = baseSource;
       if(baseSource==="embedded") req.base = bytesToB64(srcBytes);
     }

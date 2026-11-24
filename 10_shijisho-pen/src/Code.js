@@ -547,6 +547,7 @@ function loadPdf(fileId) {
       data: Utilities.base64Encode(shelf.base.getBytes()),
       marks: shelf.marks,
       pages: shelf.pages,
+      photos: shelf.photos,       // 途中保存のときに撮ってあった現品の写真(JPEG base64)
       work: work
     };
   }
@@ -652,7 +653,8 @@ function readShelf_(meta) {
     if (!data || data.v !== SHELF_VERSION || !data.marks) return null;
     if (!data.md5 || data.md5 !== meta.md5Checksum) return null;   // 外で差し替えられた
 
-    return { base: DriveApp.getFileById(got.base.id).getBlob(), marks: data.marks, pages: data.pages };
+    return { base: DriveApp.getFileById(got.base.id).getBlob(), marks: data.marks, pages: data.pages,
+             photos: data.photos || [] };
   } catch (e) {
     console.warn('棚を読めませんでした: ' + meta.id + ' ' + e.message);
     return null;
@@ -735,13 +737,18 @@ function baseBlob_(req) {
   return DriveApp.getFileById(req.fileId).getBlob();
 }
 
-/** 書き込みの一覧を棚に置く。保存したファイルの指紋も入れる。置いた ID を返す */
-function putShelfMarks_(targetId, marksJson, md5, existing) {
+/**
+ * 書き込みの一覧を棚に置く。保存したファイルの指紋も入れる。置いた ID を返す。
+ * photos: 途中保存のときに撮ってあった現品の写真(JPEG base64 の配列)。PDF本体には入れず、
+ * 開き直したときにアプリへ戻す(写真がPDFに入るのはチェック完了のときだけ)。
+ */
+function putShelfMarks_(targetId, marksJson, md5, existing, photos) {
   var m = JSON.parse(marksJson || '{}');
   var body = JSON.stringify({
     v: SHELF_VERSION,
     pages: m.pages,
     marks: m.marks || {},
+    photos: photos || [],
     md5: md5,
     savedAt: new Date().toISOString()
   });
@@ -777,6 +784,7 @@ function trashShelf_(fileId, meta) {
  *   req.baseSource  書き込む前のPDFのありか 'file' | 'shelf' | 'embedded'
  *   req.base     書き込む前のPDF(base64)。embedded のときだけ
  *   req.work     チェック完了のときに入れた作業量(指図書だけ)。説明欄に足す(withWork_)
+ *   req.photos   上書き・別名のとき、撮ってあった現品の写真(JPEG base64 の配列)。棚に置く
  * @return {Object} 保存結果
  */
 function savePdf(req) {
@@ -810,7 +818,7 @@ function savePdf(req) {
       got.base = { id: shelfPut_(shelfNames_(req.fileId).base, baseBlob_(req), got.base) };
     }
     // 一覧は先に置く。指紋は手元で計算できるので、ファイルの更新を待たない
-    got.marks = { id: putShelfMarks_(req.fileId, req.marks, md5, got.marks) };
+    got.marks = { id: putShelfMarks_(req.fileId, req.marks, md5, got.marks, req.photos) };
 
     var props = savedProps_();
     props[SHELF_BASE_PROP] = got.base.id;
@@ -821,7 +829,7 @@ function savePdf(req) {
     var updated = Drive.Files.update(upMeta, req.fileId, blob,
                                      { supportsAllDrives: true, fields: 'id,md5Checksum' });
     if (updated.md5Checksum && updated.md5Checksum !== md5) {
-      putShelfMarks_(req.fileId, req.marks, updated.md5Checksum, got.marks);   // 念のため合わせる
+      putShelfMarks_(req.fileId, req.marks, updated.md5Checksum, got.marks, req.photos);   // 念のため合わせる
     }
     if (req.carry) afterWorkListCarry_(req.fileId);    // 一覧表の訂正版にチェックを写した
     return {
@@ -868,7 +876,7 @@ function savePdf(req) {
 
   var cp = savedProps_();
   cp[SHELF_BASE_PROP] = shelfPut_(shelfNames_(created.id).base, base, null);
-  cp[SHELF_MARKS_PROP] = putShelfMarks_(created.id, req.marks, created.md5Checksum || md5, null);
+  cp[SHELF_MARKS_PROP] = putShelfMarks_(created.id, req.marks, created.md5Checksum || md5, null, req.photos);
   Drive.Files.update({ properties: cp }, created.id, null, { supportsAllDrives: true });
 
   return {
