@@ -504,7 +504,7 @@ function collectFolderIds_(root) {
 function loadPdf(fileId) {
   // 名前・種類・目印・指紋を1回で取る
   var meta = Drive.Files.get(fileId, {
-    supportsAllDrives: true, fields: 'id,name,mimeType,properties,md5Checksum,description,trashed'
+    supportsAllDrives: true, fields: 'id,name,mimeType,properties,md5Checksum,description,trashed,modifiedTime'
   });
   if (meta.mimeType !== PDF_MIME) throw new Error('PDFではありません: ' + meta.name);
   // ゴミ箱のもの(チェック完了して元を片付けたもの)は開かない。一覧に残って見えても、未チェックとして書き込ませない
@@ -548,7 +548,8 @@ function loadPdf(fileId) {
       marks: shelf.marks,
       pages: shelf.pages,
       photos: shelf.photos,       // 途中保存のときに撮ってあった現品の写真(JPEG base64)
-      work: work
+      work: work,
+      savedAt: meta.modifiedTime  // アプリの下書き(端末に控えた未保存の書き込み)がこれより古ければ使わない
     };
   }
 
@@ -556,7 +557,8 @@ function loadPdf(fileId) {
     id: fileId,
     name: meta.name,
     data: Utilities.base64Encode(DriveApp.getFileById(fileId).getBlob().getBytes()),
-    work: work
+    work: work,
+    savedAt: meta.modifiedTime
   };
 }
 

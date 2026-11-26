@@ -660,6 +660,7 @@ function openWork(targets, onOk){
       if(workParts(w).length || workInput[id]) workInput[id]=w;
     });
     $("#work").hidden=true;
+    if(dirty) scheduleDraft();
     onOk();
   };
   $("#work").hidden=false;
@@ -832,6 +833,7 @@ function restoreKeptPhotos(){
 function setDirty(v){
   dirty=v;
   if(!v) photosDirty=false;
+  if(v) scheduleDraft();
   $("#dirty").classList.toggle("show", v);
 }
 window.addEventListener("beforeunload", function(e){
@@ -848,7 +850,7 @@ $("#browse").onclick = $("#browse2").onclick = openDrawer;
    上書き済みのぶんは Drive に残っているので、消えるのは最後に保存して
    からの書き込みだけ。 */
 function closeWithoutSaving(){
-  var back=function(){ clearPhotos(); closeFile(); refreshFiles(); openDrawer(); };
+  var back=function(){ draftDel(openIds()); clearPhotos(); closeFile(); refreshFiles(); openDrawer(); };
   if(!dirty){ back(); return; }
   var what = photosDirty ? "保存していない書き込みか現品の写真" : "保存していない書き込み";
   ask(what + "があります。\n保存せずに閉じますか？\n(最後に保存してからの分は消えます)",
@@ -1219,7 +1221,7 @@ function b64ToBytes(b64){
 function openFile(f){
   if(dirty){
     ask("未保存の書き込みがあります。\n破棄して別のファイルを開きますか?",
-        function(){ doOpenFile(f); });
+        function(){ draftDel(openIds()); doOpenFile(f); });
     return;
   }
   doOpenFile(f);
@@ -1317,7 +1319,7 @@ function grpMemberAt(page){
 
 function openGroup(files){
   if(dirty){
-    ask("未保存の書き込みがあります。\n破棄してまとめて開きますか?", function(){ doOpenGroup(files); });
+    ask("未保存の書き込みがあります。\n破棄してまとめて開きますか?", function(){ draftDel(openIds()); doOpenGroup(files); });
     return;
   }
   doOpenGroup(files);
@@ -1334,7 +1336,7 @@ function prepMember(res, f){
   var p=parseSortName(f.name);
   if(res.work) workInput[res.id]=res.work;
   shelfPhotos(res);
-  var m={id:res.id, name:res.name, no:p ? p.no : res.name, part:orderPart(p) || 1,
+  var m={id:res.id, name:res.name, savedAt:res.savedAt, no:p ? p.no : res.name, part:orderPart(p) || 1,
          qty:Number(f.qty)||0, bytes:b64ToBytes(res.data), marks:{}, baseSource:"file"};
   return pdfjsLib.getDocument({data: m.bytes.slice()}).promise.then(function(doc){
     if(res.marks && (!res.pages || res.pages===doc.numPages)){
@@ -1415,6 +1417,7 @@ function doOpenGroup(files){
       markCurrent();
       toast(curFile.name + " をまとめて開きました(" + pageCount + "ページ)");
       restoreKeptPhotos();
+      offerDraft();
     });
   }).catch(function(err){
     console.error(err);
@@ -1472,6 +1475,7 @@ function saveGroup(mode, pick){
       });
     }).then(function(){
       if(mode==="overwrite") m.baseSource="shelf";
+      draftDel([m.id]);
       okParts.push(partLabel(m));
       forgetFileInMemo(m.id, mode!=="done");
     });
@@ -1501,6 +1505,7 @@ function saveGroup(mode, pick){
 
   next().then(function(){
     setDirty(false);
+    draftDel(all.map(function(m){ return m.id; }));
     if(partial){
       toast("チェック完了 " + doneParts.join("") + " を保存しました。残りを開き直します");
       reopenRest(rest);
@@ -1708,7 +1713,7 @@ function labelPng(text){
 }
 
 function mountPdf(res, note){
-  curFile={id:res.id, name:res.name};
+  curFile={id:res.id, name:res.name, savedAt:res.savedAt};
   workInput={};                                  // 別のファイルで入れた(保存していない)作業量は持ち越さない
   if(res.work) workInput[res.id]=res.work;      // 上書き保存のときに入れた作業量
   grp=null;
@@ -1743,6 +1748,7 @@ function mountPdf(res, note){
     toast(note || (restored ? curFile.name + "(前回の書き込みを直せます)" : curFile.name));
     if(res.after) res.after();
     restoreKeptPhotos();
+    if(res.savedAt) offerDraft();     // 訂正版のつなぎ・一覧表の写し(savedAt なし)は、そのまま保存する流れなので聞かない
   }).catch(function(err){
     console.error(err);
     toast("PDFを表示できませんでした");
@@ -2390,6 +2396,126 @@ inkCv.addEventListener("pointerup", endStroke);
 inkCv.addEventListener("pointercancel", endStroke);
 inkCv.addEventListener("pointerleave", endStroke);
 
+/* ---------- 下書き ----------
+   保存していない書き込み・写真・特別作業を、端末(IndexedDB)にも控えておく。
+   画面を読み込み直した・アプリが落ちた・確認画面から抜けられなかった、などで消えても、
+   次にその指図書を開いたときに戻せる(前は最後に保存したところまで戻り、書き直しになっていた)。
+   保存できたら・自分で「保存せずに閉じる」を選んだら消す。Drive の方が新しければ使わない。7日で捨てる。 */
+var draftDbP=null, draftT=null;
+function draftDb(){
+  if(!draftDbP) draftDbP=new Promise(function(res, rej){
+    var r=indexedDB.open("shijisho-draft", 1);
+    r.onupgradeneeded=function(){ r.result.createObjectStore("d", {keyPath:"id"}); };
+    r.onsuccess=function(){ res(r.result); };
+    r.onerror=function(){ rej(r.error); };
+  });
+  return draftDbP;
+}
+/* fn(store) で読み書きする。使えない端末では何もしない(下書きが無いだけ) */
+function draftTx(mode, fn){
+  return draftDb().then(function(db){
+    return new Promise(function(res, rej){
+      var tx=db.transaction("d", mode), out=fn(tx.objectStore("d"));
+      tx.oncomplete=function(){ res(out); };
+      tx.onerror=tx.onabort=function(){ rej(tx.error); };
+    });
+  }).catch(function(e){ console.warn("下書きを使えません", e); return null; });
+}
+function draftDel(ids){
+  return draftTx("readwrite", function(st){ ids.forEach(function(id){ if(id) st.delete(id); }); });
+}
+function draftGet(ids){
+  return draftTx("readonly", function(st){
+    var out=[];
+    ids.forEach(function(id){ var r=st.get(id); r.onsuccess=function(){ if(r.result) out.push(r.result); }; });
+    return out;
+  }).then(function(out){ return out || []; });
+}
+function openIds(){ return grp ? grp.map(function(m){ return m.id; }) : (curFile ? [curFile.id] : []); }
+
+function cleanMarks(list){
+  return (list||[]).map(function(m){
+    var c={}; Object.keys(m).forEach(function(k){ if(k!=="drawn" && k!=="mismatch") c[k]=m[k]; }); return c;
+  });
+}
+/* 今の状態を指図書ごとに。ページ番号はその指図書の中の番号 */
+function draftSnapshot(){
+  var at=Date.now();
+  if(!grp){
+    var mk={}; Object.keys(marks).forEach(function(k){ if((marks[k]||[]).length) mk[k]=cleanMarks(marks[k]); });
+    return [{id:curFile.id, at:at, pages:pageCount, marks:mk, photos:photos.slice(), photoPages:photoPages.slice(),
+             work:workInput[curFile.id] || null}];
+  }
+  return grp.map(function(m){
+    var mk={}, has=false;
+    for(var n=1;n<=m.pages;n++){
+      var list=marks[String(m.at[n])];
+      if(list && list.length){ mk[String(n)]=cleanMarks(list); has=true; }
+    }
+    var ph=[]; photos.forEach(function(b, k){ if(grpMemberAt(photoPages[k]||1)===m) ph.push(b); });
+    // 何も無い指図書は控えない
+    if(!has && !ph.length && !workInput[m.id]) return null;
+    return {id:m.id, at:at, pages:m.pages, marks:mk, photos:ph, work:workInput[m.id] || null};
+  }).filter(Boolean);
+}
+/* 書き込むたびに少し待ってから控える */
+function scheduleDraft(){
+  clearTimeout(draftT);
+  draftT=setTimeout(function(){
+    if(!dirty || !curFile) return;
+    var snap=draftSnapshot();
+    draftTx("readwrite", function(st){ snap.forEach(function(d){ st.put(d); }); });
+  }, 800);
+}
+/* 開いたあと、控えが Drive より新しければ戻すか聞く */
+function offerDraft(){
+  var ids=openIds(), at={};
+  if(grp) grp.forEach(function(m){ at[m.id]=m.savedAt; }); else if(curFile) at[curFile.id]=curFile.savedAt;
+  var opened=curFile;
+  draftGet(ids).then(function(list){
+    if(curFile!==opened) return;
+    var stale=[];
+    list=list.filter(function(d){
+      var t=at[d.id] ? Date.parse(at[d.id]) : 0;
+      if(t && d.at < t){ stale.push(d.id); return false; }   // そのあと Drive に保存されている
+      return true;
+    });
+    if(stale.length) draftDel(stale);
+    if(!list.length) return;
+    var last=new Date(Math.max.apply(null, list.map(function(d){ return d.at; })));
+    var when=(last.getMonth()+1)+"/"+last.getDate()+" "+last.getHours()+":"+("0"+last.getMinutes()).slice(-2);
+    var who = grp ? "\n" + list.map(function(d){
+      var m=grp.filter(function(x){ return x.id===d.id; })[0]; return m ? partLabel(m) : ""; }).join("") : "";
+    ask("保存していない書き込みが、この端末に残っています(" + when + ")。" + who + "\n戻しますか?",
+      function(){ applyDraft(list); },
+      { yes:"戻す", extra:{ label:"捨てる", fn:function(){
+          draftDel(list.map(function(d){ return d.id; })); toast("残っていた書き込みを捨てました"); }}});
+  });
+}
+function applyDraft(list){
+  list.forEach(function(d){
+    if(!grp){
+      if(!curFile || d.id!==curFile.id || d.pages!==pageCount) return;
+      marks={}; Object.keys(d.marks).forEach(function(k){ marks[k]=d.marks[k]; });
+      photos=(d.photos||[]).slice(); photoPages=(d.photoPages||[]).slice();
+    } else {
+      var m=grp.filter(function(x){ return x.id===d.id; })[0];
+      if(!m || d.pages!==m.pages) return;
+      for(var n=1;n<=m.pages;n++) delete marks[String(m.at[n])];
+      Object.keys(d.marks).forEach(function(k){ marks[String(m.at[k])]=d.marks[k]; });
+      var keepB=[], keepP=[];
+      photos.forEach(function(b, k){ if(grpMemberAt(photoPages[k]||1)!==m){ keepB.push(b); keepP.push(photoPages[k]); } });
+      (d.photos||[]).forEach(function(b){ keepB.push(b); keepP.push(m.at[1]); });
+      photos=keepB; photoPages=keepP;
+    }
+    if(d.work) workInput[d.id]=d.work;
+  });
+  updatePhotoBtn(); updateWorkBtn();
+  photosDirty=true; setDirty(true);
+  renderPage();
+  toast("保存していなかった書き込みを戻しました。保存してください");
+}
+
 /* ---------- 現品写真 ---------- */
 /* チェック完了のときだけ、撮った写真をPDFの末尾に足す。
    上書き保存や別名保存ではPDFには入れず(元の枚数を勝手に増やさないため)、棚に置いておき、
@@ -2546,6 +2672,7 @@ function save(mode){
     if(res.mode==="overwrite") baseSource="shelf";   // もう棚にある
     var savedId = curFile && curFile.id;
     if(savedId) forgetFileInMemo(savedId, res.mode!=="done");
+    if(savedId) draftDel([savedId]);
     if(res.mode==="done"){
       toast("チェック完了 " + res.folder + " へ保存、元ファイルはゴミ箱へ");
       clearPhotos();
