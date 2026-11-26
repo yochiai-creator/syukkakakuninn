@@ -207,16 +207,23 @@
   #ask{position:fixed; inset:0; z-index:40; display:grid; place-items:center;
        background:rgba(20,22,26,.45); padding:20px;}
   #ask[hidden]{display:none;}
+  /* 中身が長くても(まとめての選択肢が多いときなど)画面に収め、ボタンは常に見えるようにする。
+     はみ出す分は文と選択肢の中で縦に送る */
   .askBox{background:var(--panel); border-radius:14px; padding:20px;
-          max-width:min(460px, 100%); box-shadow:0 12px 40px rgba(0,0,0,.3);}
-  #askMsg{margin:0 0 18px; font-size:15px; line-height:1.7; white-space:pre-line;}
-  .askRow{display:flex; gap:8px; justify-content:flex-end;}
+          max-width:min(460px, 100%); box-shadow:0 12px 40px rgba(0,0,0,.3);
+          display:flex; flex-direction:column; max-height:calc(100vh - 40px); max-height:calc(100dvh - 40px);}
+  #askMsg{margin:0 0 18px; font-size:15px; line-height:1.7; white-space:pre-line;
+          overflow:auto; flex:0 1 auto; min-height:3.4em;}
+  .askRow{display:flex; gap:8px; justify-content:flex-end; flex:none;}
   /* まとめて開いたときのチェック完了: どの指図書を完了にするか */
-  #askPick{margin:-6px 0 16px; display:flex; flex-direction:column; gap:6px;}
+  #askPick{margin:-6px 0 16px; display:flex; flex-direction:column; gap:6px;
+           overflow:auto; flex:0 1 auto; min-height:120px; -webkit-overflow-scrolling:touch;}
+  #askPick .pickAll{align-self:flex-start; flex:none;}
   #askPick[hidden]{display:none;}   /* display:flex が hidden を打ち消すので明示する */
   #askPick label{display:flex; align-items:center; gap:10px; padding:8px 10px; border:1px solid var(--line);
-                 border-radius:8px; background:#fff; font-size:15px;}
-  #askPick input{width:22px; height:22px; margin:0;}
+                 border-radius:8px; background:#fff; font-size:15px; flex:none;}
+  #askPick input{width:22px; height:22px; margin:0; accent-color:#0b6b5d;}
+  #askPick label:has(input:checked){background:#e8f1ec; border-color:#0b6b5d;}   /* 選んだものが一目で分かるように */
   #askPick small{color:#5c5f66; margin-left:auto; font-size:13px;}
   .askRow button{min-width:88px;}
 
@@ -778,6 +785,19 @@ function confirmDone(targets){
 /* まとめて開いたときのチェック完了の選択肢: (1) 26-30654-0(1)  2本 */
 function buildDonePick(){
   var box=$("#askPick"); box.textContent="";
+  // 数が多いときに1つずつ押さなくて済むように、全部外す・全部選ぶ
+  var all=document.createElement("button"); all.type="button"; all.className="pickAll";
+  var setAllLabel=function(){
+    var on=box.querySelectorAll("input:checked").length===grp.length;
+    all.textContent = on ? "全部外す" : "全部選ぶ";
+  };
+  all.onclick=function(){
+    var on=all.textContent==="全部選ぶ";
+    box.querySelectorAll("input").forEach(function(c){ c.checked=on; });
+    setAllLabel();
+  };
+  box.onchange=setAllLabel;
+  box.appendChild(all);
   grp.forEach(function(m){
     var lb=document.createElement("label");
     var cb=document.createElement("input"); cb.type="checkbox"; cb.value=m.id; cb.checked=true;
@@ -786,6 +806,7 @@ function buildDonePick(){
     var sm=document.createElement("small"); sm.textContent=m.qty ? m.qty+"本" : ""; lb.appendChild(sm);
     box.appendChild(lb);
   });
+  setAllLabel();
 }
 
 /* 開き直したあと、選ばなかった指図書で撮った写真や、途中保存で棚に置いた写真を戻す
